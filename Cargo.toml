@@ -1,0 +1,23 @@
+[package]
+name = "cargo-unused"
+version = "0.0.0"
+authors = ["Ryo Yamashita <qryxip@gmail.com>"]
+edition = "2018"
+description = "Find unused crates."
+repository = "https://github.com/qryxip/cargo-unused"
+readme = "README.md"
+keywords = ["cargo"]
+categories = ["development-tools::cargo-plugins"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+atty = "0.2.13"
+derive_more = "0.15.0"
+env_logger = "0.6.2"
+failure = "0.1.5"
+log = "0.4.8"
+structopt = "0.2.18"
+strum = "0.15.0"
+strum_macros = "0.15.0"
+termcolor = "1.0.5"
