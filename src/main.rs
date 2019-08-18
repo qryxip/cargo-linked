@@ -1,12 +1,14 @@
-use cargo_unused::{App, Opt};
+use cargo_unused::{CargoUnused, ExecutableTarget};
 
-use failure::Fail;
+use failure::{Fallible, ResultExt as _};
 use log::LevelFilter;
-use structopt::StructOpt as _;
+use structopt::StructOpt;
+use strum::{EnumString, IntoStaticStr};
 use termcolor::{BufferedStandardStream, WriteColor as _};
 
 use std::io::{self, Write as _};
-use std::process;
+use std::path::PathBuf;
+use std::{env, process};
 
 fn main() -> io::Result<()> {
     let Opt::Unused(opt) = Opt::from_args();
@@ -39,13 +41,13 @@ fn main() -> io::Result<()> {
         })
         .init();
 
-    match App::try_new().and_then(|app| app.run(&opt)) {
+    match opt.run() {
         Ok(output) => io::stdout().write_all(output.as_ref()),
         Err(err) => {
             let mut stderr = BufferedStandardStream::stderr(termcolor_color);
             writeln!(stderr)?;
-            for (i, cause) in Fail::iter_chain(&err).enumerate() {
-                let head = if i == 0 && err.cause().is_none() {
+            for (i, cause) in err.as_fail().iter_chain().enumerate() {
+                let head = if i == 0 && err.as_fail().cause().is_none() {
                     "error: "
                 } else if i == 0 {
                     "    error: "
@@ -66,7 +68,7 @@ fn main() -> io::Result<()> {
                     writeln!(stderr, "{}", line)?;
                 }
             }
-            let backtrace = err.backtrace().unwrap().to_string();
+            let backtrace = err.backtrace().to_string();
             if backtrace.is_empty() {
                 stderr.write_all(
                     &b"note: Run with `RUST_BACKTRACE=1` environment varialbe to display a \
@@ -77,6 +79,126 @@ fn main() -> io::Result<()> {
             }
             stderr.flush()?;
             process::exit(1)
+        }
+    }
+}
+
+#[derive(Debug, StructOpt)]
+#[structopt(bin_name = "cargo")]
+enum Opt {
+    #[structopt(name = "unused")]
+    Unused(OptUnused),
+}
+
+#[derive(Debug, StructOpt)]
+struct OptUnused {
+    #[structopt(long = "debug", help = "Run in debug mode")]
+    debug: bool,
+    #[structopt(
+        long = "bin",
+        value_name = "NAME",
+        help = "Target `bin`",
+        raw(display_order = "1", conflicts_with_all = r#"&["example", "test", "bench"]"#)
+    )]
+    bin: Option<String>,
+    #[structopt(
+        long = "example",
+        value_name = "NAME",
+        help = "Target `example`",
+        raw(display_order = "2", conflicts_with_all = r#"&["bin", "test", "bench"]"#)
+    )]
+    example: Option<String>,
+    #[structopt(
+        long = "test",
+        value_name = "NAME",
+        help = "Target `test`",
+        raw(display_order = "3", conflicts_with_all = r#"&["bin", "example", "bench"]"#)
+    )]
+    test: Option<String>,
+    #[structopt(
+        long = "bench",
+        value_name = "NAME",
+        help = "Target `bench`",
+        raw(display_order = "4", conflicts_with_all = r#"&["bin", "example", "test"]"#)
+    )]
+    bench: Option<String>,
+    #[structopt(
+        long = "manifest-path",
+        value_name = "PATH",
+        parse(from_os_str),
+        help = "Path to Cargo.toml",
+        raw(display_order = "5")
+    )]
+    manifest_path: Option<PathBuf>,
+    #[structopt(
+        long = "color",
+        value_name = "WHEN",
+        help = "Coloring",
+        raw(
+            display_order = "6",
+            default_value = "<&str>::from(ColorChoice::default())",
+            possible_values = "&ColorChoice::variants()"
+        )
+    )]
+    color: ColorChoice,
+}
+
+impl OptUnused {
+    fn run(&self) -> Fallible<String> {
+        let cwd = env::current_dir().with_context(|_| failure::err_msg("Failed to getcwd"))?;
+        let cargo =
+            env::var_os("CARGO").ok_or_else(|| failure::err_msg("$CARGO is not present"))?;
+
+        let metadata = cargo_unused::cargo_metadata(&cargo, &cwd, self.manifest_path.as_ref())?;
+
+        let target =
+            ExecutableTarget::try_from_options(&self.bin, &self.example, &self.test, &self.bench);
+
+        let outcome = CargoUnused::new(&metadata)
+            .target(target)
+            .cargo(Some(cargo))
+            .cwd(Some(cwd))
+            .debug(self.debug)
+            .run()?;
+        Ok(outcome.to_json_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy, EnumString, IntoStaticStr)]
+#[strum(serialize_all = "kebab_case")]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl Default for ColorChoice {
+    fn default() -> Self {
+        ColorChoice::Auto
+    }
+}
+
+impl ColorChoice {
+    fn variants() -> [&'static str; 3] {
+        ["auto", "always", "never"]
+    }
+
+    fn should_color(self, stream: atty::Stream) -> bool {
+        #[cfg(windows)]
+        static BLACKLIST: &[&str] = &["cygwin", "dumb"];
+
+        #[cfg(not(windows))]
+        static BLACKLIST: &[&str] = &["dumb"];
+
+        match self {
+            Self::Auto => {
+                atty::is(stream)
+                    && env::var("TERM")
+                        .ok()
+                        .map_or(false, |v| !BLACKLIST.contains(&v.as_ref()))
+            }
+            Self::Always => true,
+            Self::Never => false,
         }
     }
 }
