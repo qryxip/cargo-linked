@@ -10,7 +10,6 @@ pub mod re_exports {
 }
 
 mod error {
-    use cargo_metadata::PackageId;
     use derive_more::{Display, From};
     use failure::{Backtrace, Fail};
 
@@ -75,12 +74,20 @@ mod error {
         NonUtf8Output { arg0_filename: OsString },
         #[display(fmt = "Failed to read {}", "path.display()")]
         ReadFile { path: PathBuf },
+        #[display(fmt = "Failed to write {}", "path.display()")]
+        WriteFile { path: PathBuf },
+        #[display(fmt = "Failed to open {}", "path.display()")]
+        OpenRw { path: PathBuf },
+        #[display(fmt = "Failed to copy {} to {}", "from.display()", "to.display()")]
+        CopyDir { from: PathBuf, to: PathBuf },
+        #[display(fmt = "Failed to move {} to {}", "from.display()", "to.display()")]
+        MoveDir { from: PathBuf, to: PathBuf },
+        #[display(fmt = "Failed to remove {}", "dir.display()")]
+        RemoveDir { dir: PathBuf },
         #[display(fmt = "Failed to deserialize {}", what)]
-        Deserialize { what: &'static str },
+        Deserialize { what: String },
         #[display(fmt = "{:?} does not match {:?}", text, regex)]
         Regex { text: String, regex: &'static str },
-        #[display(fmt = "Failed to parse {:?} to a SPEC", "id.repr")]
-        ParsePackageIdToSpec { id: PackageId },
         #[display(fmt = "Failed to parse\n===STDERR===\n{}============", stderr)]
         ParseCargoBuildVvStderr { stderr: String },
         #[display(fmt = "Failed to parse {:?}", args)]
@@ -90,47 +97,96 @@ mod error {
     }
 }
 
+mod fs {
+    use failure::ResultExt as _;
+    use filetime::FileTime;
+    use serde::de::DeserializeOwned;
+
+    use std::env;
+    use std::path::{Path, PathBuf};
+
+    pub(crate) fn current_dir() -> crate::Result<PathBuf> {
+        env::current_dir()
+            .with_context(|_| crate::ErrorKind::Getcwd)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn move_dir_with_timestamps(
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> crate::Result<()> {
+        let (from, to) = (from.as_ref(), to.as_ref());
+        from.metadata()
+            .and_then(|metadata| {
+                let atime = FileTime::from_last_access_time(&metadata);
+                let mtime = FileTime::from_last_modification_time(&metadata);
+                std::fs::rename(from, to)?;
+                filetime::set_file_times(to, atime, mtime)
+            })
+            .with_context(|_| crate::ErrorKind::MoveDir {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            })
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn copy_dir(
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+        options: &fs_extra::dir::CopyOptions,
+    ) -> crate::Result<u64> {
+        let (from, to) = (from.as_ref(), to.as_ref());
+        fs_extra::dir::copy(from, to, options)
+            .with_context(|_| crate::ErrorKind::CopyDir {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            })
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn remove_dir_all(dir: impl AsRef<Path>) -> crate::Result<()> {
+        let dir = dir.as_ref();
+        remove_dir_all::remove_dir_all(dir)
+            .with_context(|_| crate::ErrorKind::RemoveDir {
+                dir: dir.to_owned(),
+            })
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn read_toml<T: DeserializeOwned>(path: &Path) -> crate::Result<T> {
+        let toml = std::fs::read_to_string(path).with_context(|_| crate::ErrorKind::ReadFile {
+            path: path.to_owned(),
+        })?;
+        toml::from_str(&toml)
+            .with_context(|_| crate::ErrorKind::Deserialize {
+                what: path.display().to_string(),
+            })
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn from_json<T: DeserializeOwned>(json: &str, what: &str) -> crate::Result<T> {
+        serde_json::from_str(json)
+            .with_context(|_| crate::ErrorKind::Deserialize {
+                what: what.to_owned(),
+            })
+            .map_err(Into::into)
+    }
+}
+
 mod parse {
     use crate::process::RustcOpts;
 
-    use cargo_metadata::PackageId;
     use either::Either;
     use failure::ResultExt as _;
     use maplit::btreemap;
-    use once_cell::sync::Lazy;
-    use regex::Regex;
     use structopt::StructOpt as _;
-    use url::Url;
 
-    use std::collections::{BTreeMap, HashMap};
-    use std::path::PathBuf;
+    use std::collections::BTreeMap;
     use std::{iter, mem};
 
-    type BySrcPath<'a> = HashMap<PathBuf, (BTreeMap<&'a str, String>, RustcOpts)>;
-
-    pub(crate) fn package_id_to_sepc(id: &PackageId) -> crate::Result<Url> {
-        static ID: Lazy<Regex> =
-            lazy_regex!(r"\A([a-zA-Z0-9_-]+) ([a-zA-Z0-9\._-]+) \([a-z]+\+([^)]+)\)\z");
-
-        let caps = ID
-            .captures(&id.repr)
-            .ok_or_else(|| {
-                let (text, regex) = (id.repr.clone(), ID.as_str());
-                crate::ErrorKind::Regex { text, regex }
-            })
-            .with_context(|_| crate::ErrorKind::ParsePackageIdToSpec { id: id.clone() })?;
-
-        let mut spec = caps[3]
-            .parse::<Url>()
-            .with_context(|_| crate::ErrorKind::ParsePackageIdToSpec { id: id.clone() })?;
-        spec.set_query(None);
-        spec.set_fragment(Some(&format!("{}:{}", &caps[1], &caps[2])));
-        Ok(spec)
-    }
-
-    pub(crate) fn cargo_build_vv_stderr_to_opts_and_envs<'a>(
-        stderr: &'a str,
-    ) -> crate::Result<BySrcPath<'a>> {
+    pub(crate) fn cargo_build_vv_stderr_to_opts_and_envs(
+        stderr: &str,
+    ) -> crate::Result<Vec<(BTreeMap<String, String>, RustcOpts)>> {
         // https://github.com/rust-lang/cargo/blob/5218d04b3160c62b99f3decbcda77f73d321bf58/src/cargo/util/process_builder.rs#L34-L59
         // https://github.com/sfackler/shell-escape/blob/81621d00297d89c98fb4d5ceb55ad3cd7c1fa69c/src/lib.rs
 
@@ -249,7 +305,7 @@ mod parse {
                                                         rest.pop();
                                                         rest.pop();
                                                     }
-                                                    envs.insert(fst, rest);
+                                                    envs.insert(fst.to_owned(), rest);
                                                 } else {
                                                     args.push(format!("{}={}", fst, rest));
                                                 }
@@ -286,7 +342,7 @@ mod parse {
             .map(|(envs, args)| {
                 let opts = RustcOpts::from_iter_safe(&args)
                     .with_context(|_| crate::ErrorKind::ParseRustcOptions { args })?;
-                Ok((opts.input().to_owned().into(), (envs, opts)))
+                Ok((envs, opts))
             })
             .collect()
     }
@@ -301,19 +357,17 @@ mod process {
     use fixedbitset::FixedBitSet;
     use itertools::Itertools as _;
     use log::info;
-    use maplit::btreemap;
     use once_cell::sync::Lazy;
     use regex::Regex;
     use structopt::StructOpt;
-    use url::Url;
 
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
-    use std::fmt;
     use std::ops::{Deref, Range};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
     use std::str::FromStr;
+    use std::{fmt, iter};
 
     /// Runs `cargo metadata`.
     pub fn cargo_metadata<S: AsRef<OsStr>, P1: AsRef<Path>, P2: AsRef<Path>>(
@@ -331,49 +385,21 @@ mod process {
             args.push(manifest_path.as_ref().as_ref());
         }
 
-        let (_, stdout, _) = ProcessBuilder::new(cargo)
-            .args(&args)
-            .cwd(Some(cwd))
-            .wait::<(ExitStatusSuccess, String, ())>()?;
+        let (_, stdout, _): (ExitStatusSuccess, String, ()) = command(
+            cargo,
+            &args,
+            iter::empty::<(&'static str, &'static str)>(),
+            Some(cwd),
+        )?;
 
-        crate::from_json(&stdout, "`cargo metadata` output")
-    }
-
-    pub(crate) fn cargo_clean(
-        cargo: &Path,
-        manifest_path: &Path,
-        specs: &BTreeSet<&Url>,
-        target_dir: &Path,
-        cwd: &Path,
-    ) -> crate::Result<()> {
-        let mut args = vec![
-            OsStr::new("clean"),
-            OsStr::new("-q"),
-            OsStr::new("--manifest-path"),
-            OsStr::new(manifest_path),
-            OsStr::new("--target-dir"),
-            OsStr::new(target_dir),
-        ];
-        if !specs.is_empty() {
-            for spec in specs {
-                args.push("-p".as_ref());
-                args.push(spec.as_str().as_ref());
-            }
-        }
-
-        ProcessBuilder::new(cargo)
-            .args(&args)
-            .cwd(Some(cwd))
-            .wait::<(ExitStatusSuccess, (), ())>()
-            .map(|_| ())
+        crate::fs::from_json(&stdout, "`cargo metadata` output")
     }
 
     pub(crate) fn cargo_build_vv(
         cargo: &Path,
-        manifest_path: &Path,
         target: Option<&ExecutableTarget>,
         target_dir: &Path,
-        cwd: &Path,
+        manifest_dir: &Path,
         debug: bool,
     ) -> crate::Result<String> {
         let mut args = vec![OsStr::new("build"), OsStr::new("-vv")];
@@ -382,8 +408,6 @@ mod process {
         }
         args.push("--target-dir".as_ref());
         args.push(target_dir.as_ref());
-        args.push("--manifest-path".as_ref());
-        args.push(manifest_path.as_ref());
         args.push("--message-format".as_ref());
         args.push("json".as_ref());
         args.push("--color".as_ref());
@@ -404,202 +428,58 @@ mod process {
             }
         }
 
-        let (ExitStatusSuccess, (), stderr) = ProcessBuilder::new(cargo)
-            .args(&args)
-            .cwd(Some(cwd))
-            .wait()?;
+        let (ExitStatusSuccess, (), stderr) = command(
+            cargo,
+            &args,
+            iter::empty::<(&'static str, &'static str)>(),
+            Some(manifest_dir),
+        )?;
         Ok(stderr)
     }
 
-    pub(crate) struct ProcessBuilder {
+    #[derive(Debug)]
+    pub(crate) struct Rustc {
         arg0: OsString,
-        args: Vec<OsString>,
+        opts: RustcOpts,
         envs: BTreeMap<String, String>,
-        cwd: Option<PathBuf>,
+        workspace_root: PathBuf,
     }
 
-    impl ProcessBuilder {
-        pub(crate) fn new(arg0: impl AsRef<OsStr>) -> Self {
-            Self {
-                arg0: arg0.as_ref().to_owned(),
-                args: vec![],
-                envs: btreemap!(),
-                cwd: None,
-            }
-        }
-
-        pub(crate) fn args(mut self, args: &[impl AsRef<OsStr>]) -> Self {
-            self.args.extend(args.iter().map(|s| s.as_ref().to_owned()));
-            self
-        }
-
-        pub(crate) fn envs<K: AsRef<str>, V: AsRef<str>, I: IntoIterator<Item = (K, V)>>(
-            mut self,
-            envs: I,
+    impl Rustc {
+        pub(crate) fn new(
+            arg0: &OsStr,
+            opts: RustcOpts,
+            envs: BTreeMap<String, String>,
+            workspace_root: &Path,
         ) -> Self {
-            let envs = envs
-                .into_iter()
-                .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()));
-            self.envs.extend(envs);
-            self
-        }
-
-        pub(crate) fn cwd(self, cwd: Option<impl AsRef<Path>>) -> Self {
             Self {
-                cwd: cwd.map(|cwd| cwd.as_ref().to_owned()),
-                ..self
+                arg0: arg0.to_owned(),
+                opts,
+                envs,
+                workspace_root: workspace_root.to_owned(),
             }
         }
 
-        pub(crate) fn wait<O: ProcessedOutput>(&self) -> crate::Result<O> {
-            #[cfg(windows)]
-            fn fmt_env(
-                key: &str,
-                val: &str,
-                f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
-            ) -> fmt::Result {
-                let val = shell_escape::escape(val.into());
-                f(&format_args!("set {}={}&& ", key, val))
-            }
-
-            #[cfg(unix)]
-            fn fmt_env(
-                key: &str,
-                val: &str,
-                f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
-            ) -> fmt::Result {
-                let val = shell_escape::escape(val.into());
-                f(&format_args!("{}={} ", key, val))
-            }
-
-            fn null_or_piped(ignore: bool) -> Stdio {
-                if ignore {
-                    Stdio::null()
-                } else {
-                    Stdio::piped()
-                }
-            }
-
-            let cwd = self
-                .cwd
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(crate::current_dir)?;
-
-            info!(
-                "`{}{}{}` in {}",
-                self.envs
-                    .iter()
-                    .format_with("", |(k, v), f| fmt_env(k, v, f)),
-                self.arg0.to_string_lossy(),
-                self.args
-                    .iter()
-                    .format_with("", |s, f| f(&format_args!(" {}", s.to_string_lossy()))),
-                cwd.display(),
-            );
-
-            let output = Command::new(&self.arg0)
-                .args(&self.args)
-                .envs(&self.envs)
-                .current_dir(cwd)
-                .stdin(Stdio::null())
-                .stdout(null_or_piped(O::IGNORE_STDOUT))
-                .stderr(null_or_piped(O::IGNORE_STDERR))
-                .output()
-                .with_context(|_| crate::ErrorKind::Command {
-                    arg0: self.arg0.clone(),
-                })?;
-
-            info!("{}", output.status);
-
-            O::process(&self.arg0, output)
+        pub(crate) fn externs(&self) -> &[Extern] {
+            &self.opts.r#extern
         }
-    }
 
-    pub(crate) struct ExitStatusSuccess;
-
-    pub(crate) trait ProcessedOutput: Sized {
-        const IGNORE_STDOUT: bool;
-        const IGNORE_STDERR: bool;
-
-        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self>;
-    }
-
-    impl ProcessedOutput for (ExitStatusSuccess, (), ()) {
-        const IGNORE_STDOUT: bool = true;
-        const IGNORE_STDERR: bool = true;
-
-        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
-            if output.status.success() {
-                Ok((ExitStatusSuccess, (), ()))
+        pub(crate) fn input_abs(&self) -> PathBuf {
+            if Path::new(&self.opts.input).is_absolute() {
+                self.opts.input.clone().into()
             } else {
-                let arg0 = arg0.to_owned();
-                Err(failure::err_msg(output.status)
-                    .context(crate::ErrorKind::Command { arg0 })
-                    .into())
+                self.workspace_root.join(&self.opts.input)
             }
         }
-    }
 
-    impl ProcessedOutput for (ExitStatusSuccess, String, ()) {
-        const IGNORE_STDOUT: bool = false;
-        const IGNORE_STDERR: bool = true;
-
-        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
-            if output.status.success() {
-                let stdout = String::from_utf8(output.stdout).with_context(|_| {
-                    let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
-                    crate::ErrorKind::NonUtf8Output { arg0_filename }
-                })?;
-                Ok((ExitStatusSuccess, stdout, ()))
-            } else {
-                let arg0 = arg0.to_owned();
-                Err(failure::err_msg(output.status)
-                    .context(crate::ErrorKind::Command { arg0 })
-                    .into())
-            }
-        }
-    }
-
-    impl ProcessedOutput for (ExitStatusSuccess, (), String) {
-        const IGNORE_STDOUT: bool = true;
-        const IGNORE_STDERR: bool = false;
-
-        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
-            if output.status.success() {
-                let stderr = String::from_utf8(output.stderr).with_context(|_| {
-                    let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
-                    crate::ErrorKind::NonUtf8Output { arg0_filename }
-                })?;
-                Ok((ExitStatusSuccess, (), stderr))
-            } else {
-                let arg0 = arg0.to_owned();
-                Err(failure::err_msg(output.status)
-                    .context(crate::ErrorKind::Command { arg0 })
-                    .into())
-            }
-        }
-    }
-
-    impl ProcessedOutput for (bool, (), ()) {
-        const IGNORE_STDOUT: bool = true;
-        const IGNORE_STDERR: bool = true;
-
-        fn process(_: &OsStr, output: Output) -> crate::Result<Self> {
-            Ok((output.status.success(), (), ()))
-        }
-    }
-
-    impl ProcessedOutput for (bool, (), String) {
-        const IGNORE_STDOUT: bool = true;
-        const IGNORE_STDERR: bool = false;
-
-        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
-            let stderr = String::from_utf8(output.stderr).with_context(|_| {
-                let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
-                crate::ErrorKind::NonUtf8Output { arg0_filename }
-            })?;
-            Ok((output.status.success(), (), stderr))
+        pub(crate) fn run(&self, exclude: &FixedBitSet) -> crate::Result<(bool, String)> {
+            command(
+                &self.arg0,
+                &self.opts.to_args(&exclude),
+                &self.envs,
+                Some(&self.workspace_root),
+            )
+            .map(|(success, (), stderr)| (success, stderr))
         }
     }
 
@@ -665,14 +545,6 @@ mod process {
     }
 
     impl RustcOpts {
-        pub(crate) fn input(&self) -> &str {
-            &self.input
-        }
-
-        pub(crate) fn r#extern(&self) -> &[Extern] {
-            &self.r#extern
-        }
-
         #[allow(clippy::cognitive_complexity)]
         pub(crate) fn to_args(&self, exclude: &FixedBitSet) -> Vec<&str> {
             let mut args = vec![];
@@ -763,7 +635,7 @@ mod process {
             for (i, r#extern) in self.r#extern.iter().enumerate() {
                 if !exclude[i] {
                     args.push("--extern");
-                    args.push(r#extern);
+                    args.push(r#extern.deref());
                 }
             }
             for extern_private in &self.extern_private {
@@ -828,6 +700,173 @@ mod process {
             &self.string
         }
     }
+
+    fn command<
+        O: ProcessedOutput,
+        S1: AsRef<OsStr>,
+        S2: AsRef<OsStr>,
+        A: Clone + IntoIterator<Item = S2>,
+        K: AsRef<str> + AsRef<OsStr>,
+        V: AsRef<str> + AsRef<OsStr>,
+        E: Clone + IntoIterator<Item = (K, V)>,
+        P: AsRef<Path>,
+    >(
+        arg0: S1,
+        args: A,
+        envs: E,
+        cwd: Option<P>,
+    ) -> crate::Result<O> {
+        #[cfg(windows)]
+        fn fmt_env(
+            key: &str,
+            val: &str,
+            f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
+        ) -> fmt::Result {
+            let val = shell_escape::escape(val.into());
+            f(&format_args!("set {}={}&& ", key, val))
+        }
+
+        #[cfg(unix)]
+        fn fmt_env(
+            key: &str,
+            val: &str,
+            f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
+        ) -> fmt::Result {
+            let val = shell_escape::escape(val.into());
+            f(&format_args!("{}={} ", key, val))
+        }
+
+        fn null_or_piped(ignore: bool) -> Stdio {
+            if ignore {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            }
+        }
+
+        let arg0 = arg0.as_ref();
+        let cwd = cwd
+            .map(|cwd| Ok(cwd.as_ref().to_owned()))
+            .unwrap_or_else(crate::fs::current_dir)?;
+
+        info!(
+            "`{}{}{}` in {}",
+            envs.clone()
+                .into_iter()
+                .format_with("", |(k, v), f| fmt_env(k.as_ref(), v.as_ref(), f)),
+            arg0.to_string_lossy(),
+            args.clone()
+                .into_iter()
+                .format_with("", |s, f| f(&format_args!(
+                    " {}",
+                    s.as_ref().to_string_lossy(),
+                ))),
+            cwd.display(),
+        );
+
+        let output = Command::new(arg0)
+            .args(args)
+            .envs(envs)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(null_or_piped(O::IGNORE_STDOUT))
+            .stderr(null_or_piped(O::IGNORE_STDERR))
+            .output()
+            .with_context(|_| crate::ErrorKind::Command {
+                arg0: arg0.to_owned(),
+            })?;
+
+        info!("{}", output.status);
+
+        O::process(arg0, output)
+    }
+
+    struct ExitStatusSuccess;
+
+    trait ProcessedOutput: Sized {
+        const IGNORE_STDOUT: bool;
+        const IGNORE_STDERR: bool;
+
+        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self>;
+    }
+
+    impl ProcessedOutput for (ExitStatusSuccess, (), ()) {
+        const IGNORE_STDOUT: bool = true;
+        const IGNORE_STDERR: bool = true;
+
+        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
+            if output.status.success() {
+                Ok((ExitStatusSuccess, (), ()))
+            } else {
+                let arg0 = arg0.to_owned();
+                Err(failure::err_msg(output.status)
+                    .context(crate::ErrorKind::Command { arg0 })
+                    .into())
+            }
+        }
+    }
+
+    impl ProcessedOutput for (ExitStatusSuccess, String, ()) {
+        const IGNORE_STDOUT: bool = false;
+        const IGNORE_STDERR: bool = true;
+
+        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
+            if output.status.success() {
+                let stdout = String::from_utf8(output.stdout).with_context(|_| {
+                    let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
+                    crate::ErrorKind::NonUtf8Output { arg0_filename }
+                })?;
+                Ok((ExitStatusSuccess, stdout, ()))
+            } else {
+                let arg0 = arg0.to_owned();
+                Err(failure::err_msg(output.status)
+                    .context(crate::ErrorKind::Command { arg0 })
+                    .into())
+            }
+        }
+    }
+
+    impl ProcessedOutput for (ExitStatusSuccess, (), String) {
+        const IGNORE_STDOUT: bool = true;
+        const IGNORE_STDERR: bool = false;
+
+        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
+            if output.status.success() {
+                let stderr = String::from_utf8(output.stderr).with_context(|_| {
+                    let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
+                    crate::ErrorKind::NonUtf8Output { arg0_filename }
+                })?;
+                Ok((ExitStatusSuccess, (), stderr))
+            } else {
+                let arg0 = arg0.to_owned();
+                Err(failure::err_msg(output.status)
+                    .context(crate::ErrorKind::Command { arg0 })
+                    .into())
+            }
+        }
+    }
+
+    impl ProcessedOutput for (bool, (), ()) {
+        const IGNORE_STDOUT: bool = true;
+        const IGNORE_STDERR: bool = true;
+
+        fn process(_: &OsStr, output: Output) -> crate::Result<Self> {
+            Ok((output.status.success(), (), ()))
+        }
+    }
+
+    impl ProcessedOutput for (bool, (), String) {
+        const IGNORE_STDOUT: bool = true;
+        const IGNORE_STDERR: bool = false;
+
+        fn process(arg0: &OsStr, output: Output) -> crate::Result<Self> {
+            let stderr = String::from_utf8(output.stderr).with_context(|_| {
+                let arg0_filename = Path::new(arg0).file_name().unwrap_or_default().to_owned();
+                crate::ErrorKind::NonUtf8Output { arg0_filename }
+            })?;
+            Ok((output.status.success(), (), stderr))
+        }
+    }
 }
 
 #[doc(inline)]
@@ -836,48 +875,27 @@ pub use crate::{
     process::cargo_metadata,
 };
 
-use crate::process::{ProcessBuilder, RustcOpts};
+use crate::process::Rustc;
 
-use cargo_metadata::{Metadata, NodeDep, PackageId};
+use cargo_metadata::{Metadata, Node, NodeDep, Package, PackageId};
 use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
-use indexmap::IndexSet;
+use indexmap::{indexset, IndexMap, IndexSet};
 use log::{info, warn};
 use maplit::hashset;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::de::DeserializeOwned;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs::OpenOptions;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::{env, fs};
-
-fn current_dir() -> crate::Result<PathBuf> {
-    env::current_dir()
-        .with_context(|_| crate::ErrorKind::Getcwd)
-        .map_err(Into::into)
-}
-
-fn read_toml<T: DeserializeOwned>(path: &Path) -> crate::Result<T> {
-    let toml = fs::read_to_string(path).with_context(|_| crate::ErrorKind::ReadFile {
-        path: path.to_owned(),
-    })?;
-    toml::from_str(&toml)
-        .with_context(|_| crate::ErrorKind::Deserialize {
-            what: "a TOML file ",
-        })
-        .map_err(Into::into)
-}
-
-fn from_json<T: DeserializeOwned>(json: &str, what: &'static str) -> crate::Result<T> {
-    serde_json::from_str(json)
-        .with_context(|_| crate::ErrorKind::Deserialize { what })
-        .map_err(Into::into)
-}
 
 /// Result.
 pub type Result<T> = std::result::Result<T, crate::Error>;
@@ -933,7 +951,6 @@ pub struct CargoUnused<'a> {
     metadata: &'a Metadata,
     target: Option<ExecutableTarget>,
     cargo: Option<PathBuf>,
-    cwd: Option<PathBuf>,
     debug: bool,
 }
 
@@ -943,7 +960,6 @@ impl<'a> CargoUnused<'a> {
             metadata,
             target: None,
             cargo: None,
-            cwd: None,
             debug: false,
         }
     }
@@ -957,11 +973,6 @@ impl<'a> CargoUnused<'a> {
         Self { cargo, ..self }
     }
 
-    pub fn cwd<P: AsRef<Path>>(self, cwd: Option<P>) -> Self {
-        let cwd = cwd.map(|p| p.as_ref().to_owned());
-        Self { cwd, ..self }
-    }
-
     pub fn debug(self, debug: bool) -> Self {
         Self { debug, ..self }
     }
@@ -969,7 +980,6 @@ impl<'a> CargoUnused<'a> {
     pub fn run(&self) -> crate::Result<Outcome> {
         let metadata = self.metadata;
         let target = self.target.as_ref();
-        let cwd = self.cwd.clone().map(Ok).unwrap_or_else(current_dir)?;
         let debug = self.debug;
         let cargo = self
             .cargo
@@ -983,12 +993,6 @@ impl<'a> CargoUnused<'a> {
             .map(|p| (&p.id, p))
             .collect::<HashMap<_, _>>();
 
-        let specs = metadata
-            .packages
-            .iter()
-            .map(|p| parse::package_id_to_sepc(&p.id).map(|s| (&p.id, s)))
-            .collect::<crate::Result<HashMap<_, _>>>()?;
-
         let resolve = metadata
             .resolve
             .as_ref()
@@ -997,7 +1001,6 @@ impl<'a> CargoUnused<'a> {
             .root
             .as_ref()
             .ok_or(crate::ErrorKind::RootNotFound)?;
-        let manifest_path = &packages[root].manifest_path;
 
         let nodes = resolve
             .nodes
@@ -1019,7 +1022,7 @@ impl<'a> CargoUnused<'a> {
                                 .iter()
                                 .any(|k| ["lib", "proc-macro", "custom-build"].contains(&k.deref()))
                         })
-                        .map(|t| &t.src_path)
+                        .map(|t| &*t.src_path)
                         .collect();
                     (&package.id, values)
                 })
@@ -1032,7 +1035,7 @@ impl<'a> CargoUnused<'a> {
                         ExecutableTarget::Test(name) => (name, "test"),
                         ExecutableTarget::Bench(name) => (name, "bench"),
                     };
-                    &packages[root]
+                    &*packages[root]
                         .targets
                         .iter()
                         .find(|t| t.name == *name && t.kind.contains(&kind.to_owned()))
@@ -1051,11 +1054,12 @@ impl<'a> CargoUnused<'a> {
                     if bins.len() == 1 {
                         &bins[0].src_path
                     } else {
-                        let default_run = read_toml::<CargoToml>(&packages[root].manifest_path)?
-                            .package
-                            .default_run
-                            .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
-                        &packages[root]
+                        let default_run =
+                            crate::fs::read_toml::<CargoToml>(&packages[root].manifest_path)?
+                                .package
+                                .default_run
+                                .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
+                        &*packages[root]
                             .targets
                             .iter()
                             .find(|t| t.name == default_run && t.kind.contains(&"bin".to_owned()))
@@ -1075,91 +1079,194 @@ impl<'a> CargoUnused<'a> {
             src_paths
         };
 
-        let target_dir = metadata.workspace_root.join("target").join("cargo_unused");
+        let root_manifest_dir = packages[root]
+            .manifest_path
+            .parent()
+            .unwrap_or(&packages[root].manifest_path);
 
-        let specs_to_clean = specs.values().collect();
-        process::cargo_clean(&cargo, manifest_path, &specs_to_clean, &target_dir, &cwd)?;
+        let target_dir = root_manifest_dir
+            .join("target")
+            .join("cargo_unused")
+            .join("target");
+        let target_dir_with_mode = root_manifest_dir
+            .join("target")
+            .join("cargo_unused")
+            .join("target")
+            .join(if debug { "debug" } else { "release" });
+        let target_dir_with_mode_bk = target_dir_with_mode.with_extension("bk");
 
-        let stderr =
-            process::cargo_build_vv(&cargo, manifest_path, target, &target_dir, &cwd, debug)?;
-        let by_src_path = parse::cargo_build_vv_stderr_to_opts_and_envs(&stderr)?
-            .into_iter()
-            .map(|(src_path, values)| {
-                if src_path.is_absolute() {
-                    (src_path, values)
-                } else {
-                    (metadata.workspace_root.join(&src_path), values)
-                }
-            })
-            .collect::<HashMap<_, _>>();
-
-        let used = {
-            let arg0 = cargo
+        let rustcs = {
+            let stderr =
+                process::cargo_build_vv(&cargo, target, &target_dir, root_manifest_dir, debug)?;
+            let rustc = cargo
                 .with_file_name("rustc")
                 .with_extension(cargo.extension().unwrap_or_default());
+            parse::cargo_build_vv_stderr_to_opts_and_envs(&stderr)?
+                .into_iter()
+                .map(|(envs, opts)| {
+                    let rustc = Rustc::new(rustc.as_ref(), opts, envs, &metadata.workspace_root);
+                    (rustc.input_abs().to_owned(), rustc)
+                })
+                .collect::<HashMap<_, _>>()
+        };
 
-            let mut used = hashset!(root);
-            let mut cur = hashset!(root);
+        crate::fs::move_dir_with_timestamps(&target_dir_with_mode, &target_dir_with_mode_bk)?;
+        crate::fs::copy_dir(
+            &target_dir_with_mode_bk,
+            &target_dir_with_mode,
+            &fs_extra::dir::CopyOptions {
+                overwrite: false,
+                skip_exist: true,
+                buffer_size: 64 * 1024,
+                copy_inside: true,
+                depth: 16,
+            },
+        )?;
 
-            while !cur.is_empty() {
-                let mut next = hashset!();
-                for cur in cur {
-                    for &src_path in &src_paths[cur] {
-                        let (envs, opts) = by_src_path.get(src_path).ok_or_else(|| {
-                            crate::ErrorKind::UnexpectedSrcPath {
-                                src_path: src_path.clone(),
-                            }
+        let result = Context {
+            debug,
+            packages: &packages,
+            root,
+            nodes: &nodes,
+            src_paths: &src_paths,
+            root_manifest_dir,
+            rustcs: &rustcs,
+        }
+        .run();
+
+        crate::fs::remove_dir_all(&target_dir_with_mode)?;
+        crate::fs::move_dir_with_timestamps(&target_dir_with_mode_bk, &target_dir_with_mode)?;
+
+        return result;
+
+        struct Context<'a, 'b> {
+            debug: bool,
+            packages: &'b HashMap<&'a PackageId, &'a Package>,
+            root: &'a PackageId,
+            nodes: &'b HashMap<&'a PackageId, &'a Node>,
+            src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Path; 1]>>,
+            root_manifest_dir: &'a Path,
+            rustcs: &'b HashMap<PathBuf, Rustc>,
+        }
+
+        impl Context<'_, '_> {
+            fn run(self) -> crate::Result<Outcome> {
+                let Context {
+                    debug,
+                    packages,
+                    root,
+                    nodes,
+                    src_paths,
+                    root_manifest_dir,
+                    rustcs,
+                } = self;
+
+                let cache_path = root_manifest_dir
+                    .join("target")
+                    .join("cargo_unused")
+                    .join("cache.json");
+                let cache_file_exists = cache_path.exists();
+                let mut cache_file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(&cache_path)
+                    .with_context(|_| crate::ErrorKind::OpenRw {
+                        path: cache_path.clone(),
+                    })?;
+                let mut cache = "".to_owned();
+                cache_file.read_to_string(&mut cache).with_context(|_| {
+                    crate::ErrorKind::ReadFile {
+                        path: cache_path.clone(),
+                    }
+                })?;
+                let mut cache = if cache_file_exists {
+                    serde_json::from_str::<Cache>(&cache).with_context(|_| {
+                        crate::ErrorKind::ReadFile {
+                            path: cache_path.clone(),
+                        }
+                    })?
+                } else {
+                    let cache = Cache::default();
+                    cache_file
+                        .write_all(cache.to_json_string().as_ref())
+                        .with_context(|_| crate::ErrorKind::WriteFile {
+                            path: cache_path.clone(),
                         })?;
-                        let output = filter_actually_used_crates(
-                            &arg0,
-                            &opts,
-                            &envs,
-                            &metadata.workspace_root,
-                            &nodes[cur].deps,
-                        )?;
-                        for &output in &output {
-                            if used.insert(output) {
-                                next.insert(output);
+                    cache
+                };
+
+                let mut used = hashset!(root.clone());
+                let mut cur = hashset!(root.clone());
+
+                while !cur.is_empty() {
+                    let mut next = hashset!();
+                    for cur in cur {
+                        if src_paths[&cur].iter().any(|&p| rustcs.contains_key(p)) {
+                            cache.get_mut(debug).remove(&cur);
+                        }
+                        match cache.entry(debug, &cur) {
+                            indexmap::map::Entry::Occupied(cache) => {
+                                for id in cache.get() {
+                                    if used.insert(id.clone()) {
+                                        next.insert(id.clone());
+                                    }
+                                }
+                            }
+                            indexmap::map::Entry::Vacant(cache) => {
+                                let cache = cache.insert(indexset!());
+                                for &src_path in &src_paths[&cur] {
+                                    let rustc = rustcs.get(src_path).ok_or_else(|| {
+                                        crate::ErrorKind::UnexpectedSrcPath {
+                                            src_path: src_path.to_owned(),
+                                        }
+                                    })?;
+                                    let output =
+                                        filter_actually_used_crates(rustc, &nodes[&cur].deps)?;
+                                    for &output in &output {
+                                        if used.insert(output.clone()) {
+                                            next.insert(output.clone());
+                                        }
+                                        cache.insert(output.clone());
+                                    }
+                                }
                             }
                         }
                     }
+                    cur = next;
                 }
-                cur = next;
+
+                cache.sort(&packages);
+                let cache = cache.to_json_string();
+                cache_file
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| cache_file.set_len(0))
+                    .and_then(|_| cache_file.write_all(cache.as_ref()))
+                    .with_context(|_| crate::ErrorKind::WriteFile { path: cache_path })?;
+
+                let mut used = used.into_iter().collect::<Vec<_>>();
+                let mut unused = packages
+                    .keys()
+                    .map(|&id| id.clone())
+                    .filter(|id| !used.contains(&id))
+                    .collect::<Vec<_>>();
+                for list in &mut [&mut used, &mut unused] {
+                    list.sort_by(|a, b| {
+                        let a = (&packages[a].name, &packages[a].version, a);
+                        let b = (&packages[b].name, &packages[b].version, b);
+                        a.cmp(&b)
+                    })
+                }
+
+                Ok(Outcome {
+                    used: used.into_iter().collect(),
+                    unused: unused.into_iter().collect(),
+                })
             }
-            used
-        };
-
-        let mut used = used.into_iter().collect::<Vec<_>>();
-        let mut unused = metadata
-            .packages
-            .iter()
-            .map(|p| &p.id)
-            .filter(|id| !used.contains(&id))
-            .collect::<Vec<_>>();
-        used.sort_by_key(|&id| (&packages[id].name, &packages[id].version, id));
-        unused.sort_by_key(|&id| (&packages[id].name, &packages[id].version, id));
-
-        return Ok(Outcome {
-            used: used.into_iter().cloned().collect(),
-            unused: unused.into_iter().cloned().collect(),
-        });
-
-        #[derive(Deserialize)]
-        struct CargoToml {
-            package: CargoTomlPackage,
-        }
-
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct CargoTomlPackage {
-            default_run: Option<String>,
         }
 
         fn filter_actually_used_crates<'a>(
-            rustc: &Path,
-            opts: &RustcOpts,
-            envs: &BTreeMap<&str, String>,
-            cwd: &Path,
+            rustc: &Rustc,
             deps: &'a [NodeDep],
         ) -> crate::Result<HashSet<&'a PackageId>> {
             #[derive(Deserialize)]
@@ -1173,8 +1280,8 @@ impl<'a> CargoUnused<'a> {
                 code: String,
             }
 
-            let mut exclusion = FixedBitSet::with_capacity(opts.r#extern().len());
-            exclusion.insert_range(0..opts.r#extern().len());
+            let mut exclusion = FixedBitSet::with_capacity(rustc.externs().len());
+            exclusion.insert_range(0..rustc.externs().len());
 
             let something_wrong = 'run: loop {
                 static E0432_SINGLE_MOD: Lazy<Regex> =
@@ -1185,11 +1292,7 @@ impl<'a> CargoUnused<'a> {
                 static E0463_SINGLE_MOD: Lazy<Regex> =
                     lazy_regex!(r"\Acan't find crate for `([a-zA-Z0-9_]+)`\z");
 
-                let (success, _, stderr) = ProcessBuilder::new(rustc)
-                    .args(&opts.to_args(&exclusion))
-                    .envs(envs)
-                    .cwd(Some(cwd))
-                    .wait::<(bool, (), String)>()?;
+                let (success, stderr) = rustc.run(&exclusion)?;
                 if success {
                     break false;
                 } else {
@@ -1200,7 +1303,7 @@ impl<'a> CargoUnused<'a> {
                     let mut num_others = 0;
 
                     for line in stderr.lines() {
-                        let msg = from_json::<ErrorMessage>(line, "an error message")?;
+                        let msg = crate::fs::from_json::<ErrorMessage>(line, "an error message")?;
 
                         if_chain! {
                             if let Some(code) = &msg.code;
@@ -1227,8 +1330,8 @@ impl<'a> CargoUnused<'a> {
                                 }
                             };
                             if let Some(caps) = regex.captures(&msg.message);
-                            if let Some(pos) = opts
-                                .r#extern()
+                            if let Some(pos) = rustc
+                                .externs()
                                 .iter()
                                 .position(|e| *e.name() == caps[1]);
                             then {
@@ -1252,12 +1355,9 @@ impl<'a> CargoUnused<'a> {
 
             if something_wrong {
                 exclusion.clear();
-                for i in 0..opts.r#extern().len() {
+                for i in 0..rustc.externs().len() {
                     exclusion.insert(i);
-                    let (success, (), ()) = ProcessBuilder::new(rustc)
-                        .args(&opts.to_args(&exclusion))
-                        .cwd(Some(cwd))
-                        .wait()?;
+                    let (success, _) = rustc.run(&exclusion)?;
                     exclusion.set(i, success);
                 }
             }
@@ -1266,13 +1366,71 @@ impl<'a> CargoUnused<'a> {
                 .iter()
                 .map(|d| (&*d.name, &d.pkg))
                 .collect::<HashMap<_, _>>();
-            Ok(opts
-                .r#extern()
+            Ok(rustc
+                .externs()
                 .iter()
                 .enumerate()
                 .filter(|&(i, _)| !exclusion[i])
                 .flat_map(|(_, e)| deps.get(&e.name()).cloned())
                 .collect())
+        }
+
+        #[derive(Deserialize)]
+        struct CargoToml {
+            package: CargoTomlPackage,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct CargoTomlPackage {
+            default_run: Option<String>,
+        }
+
+        #[derive(Default, Serialize, Deserialize)]
+        struct Cache {
+            debug: IndexMap<PackageId, IndexSet<PackageId>>,
+            release: IndexMap<PackageId, IndexSet<PackageId>>,
+        }
+
+        impl Cache {
+            fn to_json_string(&self) -> String {
+                serde_json::to_string(&self).expect("should not fail")
+            }
+
+            fn get_mut(&mut self, debug: bool) -> &mut IndexMap<PackageId, IndexSet<PackageId>> {
+                if debug {
+                    &mut self.debug
+                } else {
+                    &mut self.release
+                }
+            }
+
+            fn entry<'a>(
+                &'a mut self,
+                debug: bool,
+                key: &PackageId,
+            ) -> indexmap::map::Entry<'a, PackageId, IndexSet<PackageId>> {
+                self.get_mut(debug).entry(key.clone())
+            }
+
+            fn sort(&mut self, packages: &HashMap<&PackageId, &Package>) {
+                fn sort(
+                    map: &mut IndexMap<PackageId, IndexSet<PackageId>>,
+                    packages: &HashMap<&PackageId, &Package>,
+                ) {
+                    for values in map.values_mut() {
+                        values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
+                    }
+                    map.sort_by(|x, _, y, _| ordkey(packages[x]).cmp(&ordkey(packages[y])));
+                }
+
+                fn ordkey(package: &Package) -> (&str, &Version, &PackageId) {
+                    (&package.name, &package.version, &package.id)
+                }
+
+                sort(&mut self.debug, packages);
+                sort(&mut self.release, packages);
+            }
         }
     }
 }

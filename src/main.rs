@@ -98,28 +98,40 @@ struct OptUnused {
         long = "bin",
         value_name = "NAME",
         help = "Target `bin`",
-        raw(display_order = "1", conflicts_with_all = r#"&["example", "test", "bench"]"#)
+        raw(
+            display_order = "1",
+            conflicts_with_all = r#"&["example", "test", "bench"]"#
+        )
     )]
     bin: Option<String>,
     #[structopt(
         long = "example",
         value_name = "NAME",
         help = "Target `example`",
-        raw(display_order = "2", conflicts_with_all = r#"&["bin", "test", "bench"]"#)
+        raw(
+            display_order = "2",
+            conflicts_with_all = r#"&["bin", "test", "bench"]"#
+        )
     )]
     example: Option<String>,
     #[structopt(
         long = "test",
         value_name = "NAME",
         help = "Target `test`",
-        raw(display_order = "3", conflicts_with_all = r#"&["bin", "example", "bench"]"#)
+        raw(
+            display_order = "3",
+            conflicts_with_all = r#"&["bin", "example", "bench"]"#
+        )
     )]
     test: Option<String>,
     #[structopt(
         long = "bench",
         value_name = "NAME",
         help = "Target `bench`",
-        raw(display_order = "4", conflicts_with_all = r#"&["bin", "example", "test"]"#)
+        raw(
+            display_order = "4",
+            conflicts_with_all = r#"&["bin", "example", "test"]"#
+        )
     )]
     bench: Option<String>,
     #[structopt(
@@ -157,7 +169,6 @@ impl OptUnused {
         let outcome = CargoUnused::new(&metadata)
             .target(target)
             .cargo(Some(cargo))
-            .cwd(Some(cwd))
             .debug(self.debug)
             .run()?;
         Ok(outcome.to_json_string())

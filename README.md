@@ -39,7 +39,7 @@ OPTIONS:
 ```
 
 ```
-$ cargo unused 2>&- | jq .unused
+$ cargo unused --debug 2>&- | jq .unused
 [
   "cloudabi 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
   "redox_syscall 0.1.56 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -47,10 +47,11 @@ $ cargo unused 2>&- | jq .unused
   "winapi-i686-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
   "winapi-util 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
   "winapi-x86_64-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
-  "wincolor 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)"
+  "wincolor 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)"
 ]
+
 ```
 
 ## License
 
-Dual-licensed under [MIT](https://opensource.org/licenses/MIT) and [Apache-2.0](http://www.apache.org/licenses/LICENSE-2.0).
+Licensed under [MIT](https://opensource.org/licenses/MIT) OR [Apache-2.0](http://www.apache.org/licenses/LICENSE-2.0).
