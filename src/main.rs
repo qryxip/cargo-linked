@@ -1,4 +1,4 @@
-use cargo_unused::{CargoUnused, ExecutableTarget};
+use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
 
 use failure::{Fallible, ResultExt as _};
 use log::LevelFilter;
@@ -161,7 +161,10 @@ impl OptUnused {
         let cargo =
             env::var_os("CARGO").ok_or_else(|| failure::err_msg("$CARGO is not present"))?;
 
-        let metadata = cargo_unused::cargo_metadata(&cargo, &cwd, self.manifest_path.as_ref())?;
+        let metadata = CargoMetadata::new(&cargo)
+            .manifest_path(self.manifest_path.as_ref())
+            .cwd(Some(&cwd))
+            .run()?;
 
         let target =
             ExecutableTarget::try_from_options(&self.bin, &self.example, &self.test, &self.bench);

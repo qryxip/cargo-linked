@@ -1,12 +1,25 @@
+//! Find unused crates.
+//!
+//! ```no_run
+//! use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
+//!
+//! let metadata = CargoMetadata::new("cargo")
+//!     .manifest_path(Some("./Cargo.toml"))
+//!     .cwd(Some("."))
+//!     .run()?;
+//!
+//! let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
+//!     .target(Some(ExecutableTarget::Bin("main".to_owned())))
+//!     .cargo(Some("cargo"))
+//!     .debug(true)
+//!     .run()?;
+//! # failure::Fallible::Ok(())
+//! ```
+
 macro_rules! lazy_regex {
     ($regex:expr $(,)?) => {
         ::once_cell::sync::Lazy::new(|| ::regex::Regex::new($regex).unwrap())
     };
-}
-
-pub mod re_exports {
-    //! Re-exports.
-    pub use {cargo_metadata, indexmap};
 }
 
 mod error {
@@ -369,11 +382,10 @@ mod process {
     use std::str::FromStr;
     use std::{fmt, iter};
 
-    /// Runs `cargo metadata`.
-    pub fn cargo_metadata<S: AsRef<OsStr>, P1: AsRef<Path>, P2: AsRef<Path>>(
-        cargo: S,
-        cwd: P1,
-        manifest_path: Option<P2>,
+    pub(crate) fn cargo_metadata(
+        cargo: impl AsRef<OsStr>,
+        cwd: Option<impl AsRef<Path>>,
+        manifest_path: Option<impl AsRef<Path>>,
     ) -> crate::Result<Metadata> {
         let mut args = vec![
             OsStr::new("metadata"),
@@ -385,11 +397,11 @@ mod process {
             args.push(manifest_path.as_ref().as_ref());
         }
 
-        let (_, stdout, _): (ExitStatusSuccess, String, ()) = command(
+        let (_, stdout, _) = command::<(ExitStatusSuccess, String, ()), _, _, _, _, _, _, _>(
             cargo,
             &args,
             iter::empty::<(&'static str, &'static str)>(),
-            Some(cwd),
+            cwd,
         )?;
 
         crate::fs::from_json(&stdout, "`cargo metadata` output")
@@ -870,10 +882,9 @@ mod process {
 }
 
 #[doc(inline)]
-pub use crate::{
-    error::{Error, ErrorKind},
-    process::cargo_metadata,
-};
+pub use crate::error::{Error, ErrorKind};
+
+pub use {cargo_metadata, indexmap};
 
 use crate::process::Rustc;
 
@@ -892,6 +903,7 @@ use smallvec::SmallVec;
 
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::ops::Deref;
@@ -947,6 +959,77 @@ impl ExecutableTarget {
     }
 }
 
+/// Executes `cargo metadata`.
+///
+/// # Example
+///
+/// ```no_run
+/// use cargo_unused::CargoMetadata;
+///
+/// let metadata = CargoMetadata::new("cargo")
+///     .manifest_path(Some("./Cargo.toml"))
+///     .cwd(Some("."))
+///     .run()?;
+/// # failure::Fallible::Ok(())
+/// ```
+pub struct CargoMetadata {
+    cargo: OsString,
+    manifest_path: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+}
+
+impl CargoMetadata {
+    /// Constructs a new `CargoMetadata`.
+    pub fn new<S: AsRef<OsStr>>(cargo: S) -> Self {
+        Self {
+            cargo: cargo.as_ref().to_owned(),
+            manifest_path: None,
+            cwd: None,
+        }
+    }
+
+    /// Sets `manifest_path`.
+    pub fn manifest_path<P: AsRef<Path>>(self, manifest_path: Option<P>) -> Self {
+        Self {
+            manifest_path: manifest_path.map(|p| p.as_ref().to_owned()),
+            ..self
+        }
+    }
+
+    /// Sets `cwd`.
+    pub fn cwd<P: AsRef<Path>>(self, cwd: Option<P>) -> Self {
+        Self {
+            cwd: cwd.map(|p| p.as_ref().to_owned()),
+            ..self
+        }
+    }
+
+    /// Executes `cargo metadata`.
+    pub fn run(&self) -> crate::Result<Metadata> {
+        crate::process::cargo_metadata(&self.cargo, self.manifest_path.as_ref(), self.cwd.as_ref())
+    }
+}
+
+/// Finds unused packages.
+///
+/// # Example
+///
+/// ```no_run
+/// use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
+/// use failure::Fallible;
+///
+/// let metadata = CargoMetadata::new("cargo")
+///     .manifest_path(Some("./Cargo.toml"))
+///     .cwd(Some("."))
+///     .run()?;
+///
+/// let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
+///     .target(Some(ExecutableTarget::Bin("main".to_owned())))
+///     .cargo(Some("cargo"))
+///     .debug(true)
+///     .run()?;
+/// # Fallible::Ok(())
+/// ```
 pub struct CargoUnused<'a> {
     metadata: &'a Metadata,
     target: Option<ExecutableTarget>,
@@ -955,6 +1038,7 @@ pub struct CargoUnused<'a> {
 }
 
 impl<'a> CargoUnused<'a> {
+    /// Constructs a new `CargoUnused`.
     pub fn new(metadata: &'a Metadata) -> Self {
         Self {
             metadata,
@@ -964,19 +1048,23 @@ impl<'a> CargoUnused<'a> {
         }
     }
 
+    /// Sets `target`.
     pub fn target(self, target: Option<ExecutableTarget>) -> Self {
         Self { target, ..self }
     }
 
+    /// Sets `cargo`.
     pub fn cargo<P: AsRef<Path>>(self, cargo: Option<P>) -> Self {
         let cargo = cargo.map(|p| p.as_ref().to_owned());
         Self { cargo, ..self }
     }
 
+    /// Sets `debug`.
     pub fn debug(self, debug: bool) -> Self {
         Self { debug, ..self }
     }
 
+    /// Executes.
     pub fn run(&self) -> crate::Result<Outcome> {
         let metadata = self.metadata;
         let target = self.target.as_ref();
