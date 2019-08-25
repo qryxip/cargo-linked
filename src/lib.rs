@@ -3,15 +3,20 @@
 //! ```no_run
 //! use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
 //!
+//! let ctrl_c = tokio_signal::ctrl_c();
+//! let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
+//!
 //! let metadata = CargoMetadata::new("cargo")
 //!     .manifest_path(Some("./Cargo.toml"))
 //!     .cwd(Some("."))
+//!     .ctrl_c(Some(&mut ctrl_c))
 //!     .run()?;
 //!
 //! let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
 //!     .target(Some(ExecutableTarget::Bin("main".to_owned())))
 //!     .cargo(Some("cargo"))
 //!     .debug(true)
+//!     .ctrl_c(Some(&mut ctrl_c))
 //!     .run()?;
 //! # failure::Fallible::Ok(())
 //! ```
@@ -78,6 +83,10 @@ mod error {
         CargoEnvVarNotPresent,
         #[display(fmt = "Failed to getcwd")]
         Getcwd,
+        #[display(fmt = "Interrupted")]
+        CtrlC,
+        #[display(fmt = "tokio error")]
+        Tokio,
         #[display(fmt = "`{}` failed", "arg0.to_string_lossy()")]
         Command { arg0: OsString },
         #[display(
@@ -366,26 +375,30 @@ mod process {
 
     use cargo_metadata::Metadata;
     use derive_more::Display;
-    use failure::ResultExt as _;
+    use failure::{Fail as _, ResultExt as _};
     use fixedbitset::FixedBitSet;
+    use if_chain::if_chain;
     use itertools::Itertools as _;
     use log::info;
     use once_cell::sync::Lazy;
     use regex::Regex;
     use structopt::StructOpt;
+    use tokio_process::{CommandExt as _, OutputAsync};
 
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::ops::{Deref, Range};
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Output, Stdio};
+    use std::process::{Output, Stdio};
     use std::str::FromStr;
     use std::{fmt, iter};
 
     pub(crate) fn cargo_metadata(
         cargo: impl AsRef<OsStr>,
-        cwd: Option<impl AsRef<Path>>,
         manifest_path: Option<impl AsRef<Path>>,
+        cwd: Option<impl AsRef<Path>>,
+        rt: &mut tokio::runtime::current_thread::Runtime,
+        ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
     ) -> crate::Result<Metadata> {
         let mut args = vec![
             OsStr::new("metadata"),
@@ -397,11 +410,13 @@ mod process {
             args.push(manifest_path.as_ref().as_ref());
         }
 
-        let (_, stdout, _) = command::<(ExitStatusSuccess, String, ()), _, _, _, _, _, _, _>(
+        let (_, stdout, _) = await_command::<(ExitStatusSuccess, String, ()), _, _, _, _, _, _, _>(
             cargo,
             &args,
             iter::empty::<(&'static str, &'static str)>(),
             cwd,
+            rt,
+            ctrl_c,
         )?;
 
         crate::fs::from_json(&stdout, "`cargo metadata` output")
@@ -413,6 +428,8 @@ mod process {
         target_dir: &Path,
         manifest_dir: &Path,
         debug: bool,
+        rt: &mut tokio::runtime::current_thread::Runtime,
+        ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
     ) -> crate::Result<String> {
         let mut args = vec![OsStr::new("build"), OsStr::new("-vv")];
         if !debug {
@@ -440,11 +457,13 @@ mod process {
             }
         }
 
-        let (ExitStatusSuccess, (), stderr) = command(
+        let (ExitStatusSuccess, (), stderr) = await_command(
             cargo,
             &args,
             iter::empty::<(&'static str, &'static str)>(),
             Some(manifest_dir),
+            rt,
+            ctrl_c,
         )?;
         Ok(stderr)
     }
@@ -484,12 +503,19 @@ mod process {
             }
         }
 
-        pub(crate) fn run(&self, exclude: &FixedBitSet) -> crate::Result<(bool, String)> {
-            command(
+        pub(crate) fn run(
+            &self,
+            exclude: &FixedBitSet,
+            rt: &mut tokio::runtime::current_thread::Runtime,
+            ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
+        ) -> crate::Result<(bool, String)> {
+            await_command(
                 &self.arg0,
                 &self.opts.to_args(&exclude),
                 &self.envs,
                 Some(&self.workspace_root),
+                rt,
+                ctrl_c,
             )
             .map(|(success, (), stderr)| (success, stderr))
         }
@@ -713,7 +739,7 @@ mod process {
         }
     }
 
-    fn command<
+    fn await_command<
         O: ProcessedOutput,
         S1: AsRef<OsStr>,
         S2: AsRef<OsStr>,
@@ -727,7 +753,42 @@ mod process {
         args: A,
         envs: E,
         cwd: Option<P>,
+        rt: &mut tokio::runtime::current_thread::Runtime,
+        ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
     ) -> crate::Result<O> {
+        struct OutputWithCtrlC<'a, 'b> {
+            arg0: &'a OsStr,
+            output: OutputAsync,
+            ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+        }
+
+        impl futures01::Future for OutputWithCtrlC<'_, '_> {
+            type Item = std::process::Output;
+            type Error = crate::Error;
+
+            fn poll(&mut self) -> futures01::Poll<std::process::Output, crate::Error> {
+                if_chain! {
+                    if let Some(ctrl_c) = &mut self.ctrl_c;
+                    let ctrl_c = ctrl_c
+                        .poll()
+                        .map_err(|e| e.context(crate::ErrorKind::Tokio))?;
+                    if ctrl_c.is_ready();
+                    then {
+                        Err(crate::ErrorKind::CtrlC.into())
+                    } else {
+                        match self.output.poll() {
+                            Ok(futures01::Async::NotReady) => Ok(futures01::Async::NotReady),
+                            Ok(futures01::Async::Ready(output)) => Ok(futures01::Async::Ready(output)),
+                            Err(err) => {
+                                let arg0 = self.arg0.to_owned();
+                                Err(err.context(crate::ErrorKind::Command{ arg0 }).into())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         #[cfg(windows)]
         fn fmt_env(
             key: &str,
@@ -776,17 +837,20 @@ mod process {
             cwd.display(),
         );
 
-        let output = Command::new(arg0)
+        let output = std::process::Command::new(arg0)
             .args(args)
             .envs(envs)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(null_or_piped(O::IGNORE_STDOUT))
             .stderr(null_or_piped(O::IGNORE_STDERR))
-            .output()
-            .with_context(|_| crate::ErrorKind::Command {
-                arg0: arg0.to_owned(),
-            })?;
+            .output_async();
+
+        let output = rt.block_on(OutputWithCtrlC {
+            arg0,
+            output,
+            ctrl_c,
+        })?;
 
         info!("{}", output.status);
 
@@ -884,7 +948,8 @@ mod process {
 #[doc(inline)]
 pub use crate::error::{Error, ErrorKind};
 
-pub use {cargo_metadata, indexmap};
+pub use cargo_metadata as cargo_metadata_0_8;
+pub use indexmap as indexmap_1;
 
 use crate::process::Rustc;
 
@@ -901,6 +966,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
+use std::borrow::BorrowMut;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -966,28 +1032,36 @@ impl ExecutableTarget {
 /// ```no_run
 /// use cargo_unused::CargoMetadata;
 ///
+/// let ctrl_c = tokio_signal::ctrl_c();
+/// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
+///
 /// let metadata = CargoMetadata::new("cargo")
 ///     .manifest_path(Some("./Cargo.toml"))
 ///     .cwd(Some("."))
+///     .ctrl_c(Some(&mut ctrl_c))
 ///     .run()?;
 /// # failure::Fallible::Ok(())
 /// ```
-pub struct CargoMetadata {
+pub struct CargoMetadata<'a> {
     cargo: OsString,
     manifest_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    ctrl_c: Option<&'a mut tokio_signal::IoStream<()>>,
 }
 
-impl CargoMetadata {
+impl CargoMetadata<'static> {
     /// Constructs a new `CargoMetadata`.
     pub fn new<S: AsRef<OsStr>>(cargo: S) -> Self {
         Self {
             cargo: cargo.as_ref().to_owned(),
             manifest_path: None,
             cwd: None,
+            ctrl_c: None,
         }
     }
+}
 
+impl CargoMetadata<'_> {
     /// Sets `manifest_path`.
     pub fn manifest_path<P: AsRef<Path>>(self, manifest_path: Option<P>) -> Self {
         Self {
@@ -1004,9 +1078,30 @@ impl CargoMetadata {
         }
     }
 
+    /// Sets `ctrl_c`.
+    pub fn ctrl_c<'a>(
+        self,
+        ctrl_c: Option<&'a mut tokio_signal::IoStream<()>>,
+    ) -> CargoMetadata<'a> {
+        CargoMetadata {
+            cargo: self.cargo,
+            manifest_path: self.manifest_path,
+            cwd: self.cwd,
+            ctrl_c,
+        }
+    }
+
     /// Executes `cargo metadata`.
-    pub fn run(&self) -> crate::Result<Metadata> {
-        crate::process::cargo_metadata(&self.cargo, self.manifest_path.as_ref(), self.cwd.as_ref())
+    pub fn run(self) -> crate::Result<Metadata> {
+        let mut rt =
+            tokio::runtime::current_thread::Runtime::new().unwrap_or_else(|_| unimplemented!());
+        crate::process::cargo_metadata(
+            self.cargo,
+            self.manifest_path,
+            self.cwd,
+            &mut rt,
+            self.ctrl_c,
+        )
     }
 }
 
@@ -1016,28 +1111,33 @@ impl CargoMetadata {
 ///
 /// ```no_run
 /// use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
-/// use failure::Fallible;
+///
+/// let ctrl_c = tokio_signal::ctrl_c();
+/// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
 ///
 /// let metadata = CargoMetadata::new("cargo")
 ///     .manifest_path(Some("./Cargo.toml"))
 ///     .cwd(Some("."))
+///     .ctrl_c(Some(&mut ctrl_c))
 ///     .run()?;
 ///
 /// let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
 ///     .target(Some(ExecutableTarget::Bin("main".to_owned())))
 ///     .cargo(Some("cargo"))
 ///     .debug(true)
+///     .ctrl_c(Some(&mut ctrl_c))
 ///     .run()?;
-/// # Fallible::Ok(())
+/// # failure::Fallible::Ok(())
 /// ```
-pub struct CargoUnused<'a> {
+pub struct CargoUnused<'a, 'b> {
     metadata: &'a Metadata,
     target: Option<ExecutableTarget>,
     cargo: Option<PathBuf>,
     debug: bool,
+    ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
 }
 
-impl<'a> CargoUnused<'a> {
+impl<'a> CargoUnused<'a, 'static> {
     /// Constructs a new `CargoUnused`.
     pub fn new(metadata: &'a Metadata) -> Self {
         Self {
@@ -1045,9 +1145,12 @@ impl<'a> CargoUnused<'a> {
             target: None,
             cargo: None,
             debug: false,
+            ctrl_c: None,
         }
     }
+}
 
+impl<'a> CargoUnused<'a, '_> {
     /// Sets `target`.
     pub fn target(self, target: Option<ExecutableTarget>) -> Self {
         Self { target, ..self }
@@ -1064,8 +1167,22 @@ impl<'a> CargoUnused<'a> {
         Self { debug, ..self }
     }
 
+    /// Sets `ctrl_c`.
+    pub fn ctrl_c<'b>(
+        self,
+        ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+    ) -> CargoUnused<'a, 'b> {
+        CargoUnused {
+            metadata: self.metadata,
+            target: self.target,
+            cargo: self.cargo,
+            debug: self.debug,
+            ctrl_c,
+        }
+    }
+
     /// Executes.
-    pub fn run(&self) -> crate::Result<Outcome> {
+    pub fn run(self) -> crate::Result<Outcome> {
         let metadata = self.metadata;
         let target = self.target.as_ref();
         let debug = self.debug;
@@ -1074,6 +1191,10 @@ impl<'a> CargoUnused<'a> {
             .clone()
             .or_else(|| env::var_os("CARGO").map(Into::into))
             .ok_or_else(|| crate::ErrorKind::CargoEnvVarNotPresent)?;
+
+        let mut ctrl_c = self.ctrl_c;
+        let mut rt =
+            tokio::runtime::current_thread::Runtime::new().unwrap_or_else(|_| unimplemented!());
 
         let packages = metadata
             .packages
@@ -1184,8 +1305,15 @@ impl<'a> CargoUnused<'a> {
         let target_dir_with_mode_bk = target_dir_with_mode.with_extension("bk");
 
         let rustcs = {
-            let stderr =
-                process::cargo_build_vv(&cargo, target, &target_dir, root_manifest_dir, debug)?;
+            let stderr = process::cargo_build_vv(
+                &cargo,
+                target,
+                &target_dir,
+                root_manifest_dir,
+                debug,
+                &mut rt,
+                ctrl_c.as_mut().map(BorrowMut::borrow_mut),
+            )?;
             let rustc = cargo
                 .with_file_name("rustc")
                 .with_extension(cargo.extension().unwrap_or_default());
@@ -1212,6 +1340,8 @@ impl<'a> CargoUnused<'a> {
         )?;
 
         let result = Context {
+            rt,
+            ctrl_c,
             debug,
             packages: &packages,
             root,
@@ -1228,6 +1358,8 @@ impl<'a> CargoUnused<'a> {
         return result;
 
         struct Context<'a, 'b> {
+            rt: tokio::runtime::current_thread::Runtime,
+            ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
             debug: bool,
             packages: &'b HashMap<&'a PackageId, &'a Package>,
             root: &'a PackageId,
@@ -1240,6 +1372,8 @@ impl<'a> CargoUnused<'a> {
         impl Context<'_, '_> {
             fn run(self) -> crate::Result<Outcome> {
                 let Context {
+                    mut rt,
+                    mut ctrl_c,
                     debug,
                     packages,
                     root,
@@ -1309,8 +1443,12 @@ impl<'a> CargoUnused<'a> {
                                             src_path: src_path.to_owned(),
                                         }
                                     })?;
-                                    let output =
-                                        filter_actually_used_crates(rustc, &nodes[&cur].deps)?;
+                                    let output = filter_actually_used_crates(
+                                        rustc,
+                                        &nodes[&cur].deps,
+                                        &mut rt,
+                                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
+                                    )?;
                                     for &output in &output {
                                         if used.insert(output.clone()) {
                                             next.insert(output.clone());
@@ -1356,6 +1494,8 @@ impl<'a> CargoUnused<'a> {
         fn filter_actually_used_crates<'a>(
             rustc: &Rustc,
             deps: &'a [NodeDep],
+            mut rt: &mut tokio::runtime::current_thread::Runtime,
+            mut ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
         ) -> crate::Result<HashSet<&'a PackageId>> {
             #[derive(Deserialize)]
             struct ErrorMessage {
@@ -1380,7 +1520,12 @@ impl<'a> CargoUnused<'a> {
                 static E0463_SINGLE_MOD: Lazy<Regex> =
                     lazy_regex!(r"\Acan't find crate for `([a-zA-Z0-9_]+)`\z");
 
-                let (success, stderr) = rustc.run(&exclusion)?;
+                let (success, stderr) = rustc.run(
+                    &exclusion,
+                    &mut rt,
+                    ctrl_c.as_mut().map(BorrowMut::borrow_mut),
+                )?;
+
                 if success {
                     break false;
                 } else {
@@ -1445,7 +1590,11 @@ impl<'a> CargoUnused<'a> {
                 exclusion.clear();
                 for i in 0..rustc.externs().len() {
                     exclusion.insert(i);
-                    let (success, _) = rustc.run(&exclusion)?;
+                    let (success, _) = rustc.run(
+                        &exclusion,
+                        &mut rt,
+                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
+                    )?;
                     exclusion.set(i, success);
                 }
             }

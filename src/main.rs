@@ -157,6 +157,9 @@ struct OptUnused {
 
 impl OptUnused {
     fn run(&self) -> Fallible<String> {
+        let ctrl_c = tokio_signal::ctrl_c();
+        let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
+
         let cwd = env::current_dir().with_context(|_| failure::err_msg("Failed to getcwd"))?;
         let cargo =
             env::var_os("CARGO").ok_or_else(|| failure::err_msg("$CARGO is not present"))?;
@@ -164,6 +167,7 @@ impl OptUnused {
         let metadata = CargoMetadata::new(&cargo)
             .manifest_path(self.manifest_path.as_ref())
             .cwd(Some(&cwd))
+            .ctrl_c(Some(&mut ctrl_c))
             .run()?;
 
         let target =
@@ -173,6 +177,7 @@ impl OptUnused {
             .target(target)
             .cargo(Some(cargo))
             .debug(self.debug)
+            .ctrl_c(Some(&mut ctrl_c))
             .run()?;
         Ok(outcome.to_json_string())
     }

@@ -54,4 +54,4 @@ $ cargo unused --debug 2>&- | jq .unused
 
 ## License
 
-Licensed under [MIT](https://opensource.org/licenses/MIT) OR [Apache-2.0](http://www.apache.org/licenses/LICENSE-2.0).
+Licensed under <code>[MIT](https://opensource.org/licenses/MIT) OR [Apache-2.0](http://www.apache.org/licenses/LICENSE-2.0)</code>.
