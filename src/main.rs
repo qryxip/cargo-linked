@@ -179,7 +179,7 @@ impl OptUnused {
             .debug(self.debug)
             .ctrl_c(Some(&mut ctrl_c))
             .run()?;
-        Ok(outcome.to_json_string())
+        Ok(miniserde::json::to_string(&outcome))
     }
 }
 

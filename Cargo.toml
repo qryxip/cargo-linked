@@ -28,6 +28,7 @@ indexmap = { version = "1.1.0", features = ["serde-1"] }
 itertools = "0.8.0"
 log = "0.4.8"
 maplit = "1.0.2"
+miniserde = "0.1.12"
 once_cell = "0.2.7"
 regex = "1.2.1"
 remove_dir_all = "0.5.2"
@@ -43,4 +44,3 @@ tokio = { version = "0.1.22", default_features = false, features = ["io", "fs", 
 tokio-process = "0.2.4"
 tokio-signal = "0.2.7"
 toml = "0.5.3"
-ctrlc = "3.1.3"

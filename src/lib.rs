@@ -945,11 +945,81 @@ mod process {
     }
 }
 
+mod ser {
+    use cargo_metadata::PackageId;
+    use indexmap::{IndexMap, IndexSet};
+
+    use std::borrow::Cow;
+    use std::ops::Deref as _;
+
+    pub(crate) fn miniser_package_id_set<'a>(
+        set: &'a IndexSet<PackageId>,
+    ) -> impl miniserde::Serialize + 'a {
+        struct Serializer<'a>(indexmap::set::Iter<'a, PackageId>);
+
+        impl<'a> miniserde::Serialize for Serializer<'a> {
+            fn begin(&self) -> miniserde::ser::Fragment {
+                miniserde::ser::Fragment::Seq(Box::new(Seq(self.0.clone())))
+            }
+        }
+
+        struct Seq<'a>(indexmap::set::Iter<'a, PackageId>);
+
+        impl<'a> miniserde::ser::Seq for Seq<'a> {
+            fn next(&mut self) -> Option<&dyn miniserde::Serialize> {
+                self.0
+                    .next()
+                    .map(|id| &id.repr as &dyn miniserde::Serialize)
+            }
+        }
+
+        Serializer(set.iter())
+    }
+
+    pub(crate) fn miniser_package_id_package_id_set_map<'a>(
+        map: &'a IndexMap<PackageId, IndexSet<PackageId>>,
+    ) -> impl miniserde::Serialize + 'a {
+        struct Serializer<'a>(&'a IndexMap<PackageId, IndexSet<PackageId>>);
+
+        impl<'a> miniserde::Serialize for Serializer<'a> {
+            fn begin(&self) -> miniserde::ser::Fragment {
+                miniserde::ser::Fragment::Map(Box::new(Map {
+                    pairs: self
+                        .0
+                        .iter()
+                        .map(|(k, v)| (k.repr.deref(), miniser_package_id_set(v)))
+                        .collect(),
+                    pos: 0,
+                }))
+            }
+        }
+
+        struct Map<'a, V: miniserde::Serialize + 'a> {
+            pairs: Vec<(&'a str, V)>,
+            pos: usize,
+        }
+
+        impl<'a, V: miniserde::Serialize + 'a> miniserde::ser::Map for Map<'a, V> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                let (key, values) = self.pairs.get(self.pos)?;
+                self.pos += 1;
+                Some(((*key).into(), values))
+            }
+        }
+
+        Serializer(map)
+    }
+}
+
 #[doc(inline)]
 pub use crate::error::{Error, ErrorKind};
 
 pub use cargo_metadata as cargo_metadata_0_8;
 pub use indexmap as indexmap_1;
+pub use log as log_0_4;
+pub use miniserde as miniserde_0_1;
+pub use serde as serde_1;
+pub use tokio_signal as tokio_signal_0_2;
 
 use crate::process::Rustc;
 
@@ -963,10 +1033,9 @@ use maplit::hashset;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use semver::Version;
-use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use std::borrow::BorrowMut;
+use std::borrow::{BorrowMut, Cow};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -979,19 +1048,47 @@ use std::path::{Path, PathBuf};
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
 /// Outcome.
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 pub struct Outcome {
     pub used: IndexSet<PackageId>,
     pub unused: IndexSet<PackageId>,
 }
 
-impl Outcome {
-    pub fn to_json_string(&self) -> String {
-        serde_json::to_string(self).expect("should not fail")
-    }
+impl miniserde::Serialize for Outcome {
+    fn begin(&self) -> miniserde::ser::Fragment {
+        struct Map<V: miniserde::Serialize> {
+            used: V,
+            unused: V,
+            pos: usize,
+        }
 
-    pub fn to_json_string_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).expect("should not fail")
+        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                match self.pos {
+                    0 => {
+                        self.pos += 1;
+                        Some((
+                            Cow::Borrowed("used"),
+                            &self.used as &dyn miniserde::Serialize,
+                        ))
+                    }
+                    1 => {
+                        self.pos += 1;
+                        Some((
+                            Cow::Borrowed("unused"),
+                            &self.unused as &dyn miniserde::Serialize,
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        miniserde::ser::Fragment::Map(Box::new(Map {
+            used: crate::ser::miniser_package_id_set(&self.used),
+            unused: crate::ser::miniser_package_id_set(&self.unused),
+            pos: 0,
+        }))
     }
 }
 
@@ -1411,7 +1508,7 @@ impl<'a> CargoUnused<'a, '_> {
                 } else {
                     let cache = Cache::default();
                     cache_file
-                        .write_all(cache.to_json_string().as_ref())
+                        .write_all(miniserde::json::to_string(&cache).as_ref())
                         .with_context(|_| crate::ErrorKind::WriteFile {
                             path: cache_path.clone(),
                         })?;
@@ -1463,7 +1560,7 @@ impl<'a> CargoUnused<'a, '_> {
                 }
 
                 cache.sort(&packages);
-                let cache = cache.to_json_string();
+                let cache = miniserde::json::to_string(&cache);
                 cache_file
                     .seek(SeekFrom::Start(0))
                     .and_then(|_| cache_file.set_len(0))
@@ -1497,13 +1594,13 @@ impl<'a> CargoUnused<'a, '_> {
             mut rt: &mut tokio::runtime::current_thread::Runtime,
             mut ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
         ) -> crate::Result<HashSet<&'a PackageId>> {
-            #[derive(Deserialize)]
+            #[derive(serde::Deserialize)]
             struct ErrorMessage {
                 message: String,
                 code: Option<ErrorMessageCode>,
             }
 
-            #[derive(Deserialize)]
+            #[derive(serde::Deserialize)]
             struct ErrorMessageCode {
                 code: String,
             }
@@ -1612,28 +1709,24 @@ impl<'a> CargoUnused<'a, '_> {
                 .collect())
         }
 
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         struct CargoToml {
             package: CargoTomlPackage,
         }
 
-        #[derive(Deserialize)]
+        #[derive(serde::Deserialize)]
         #[serde(rename_all = "kebab-case")]
         struct CargoTomlPackage {
             default_run: Option<String>,
         }
 
-        #[derive(Default, Serialize, Deserialize)]
+        #[derive(Default, serde::Deserialize)]
         struct Cache {
             debug: IndexMap<PackageId, IndexSet<PackageId>>,
             release: IndexMap<PackageId, IndexSet<PackageId>>,
         }
 
         impl Cache {
-            fn to_json_string(&self) -> String {
-                serde_json::to_string(&self).expect("should not fail")
-            }
-
             fn get_mut(&mut self, debug: bool) -> &mut IndexMap<PackageId, IndexSet<PackageId>> {
                 if debug {
                     &mut self.debug
@@ -1667,6 +1760,44 @@ impl<'a> CargoUnused<'a, '_> {
 
                 sort(&mut self.debug, packages);
                 sort(&mut self.release, packages);
+            }
+        }
+
+        impl miniserde::Serialize for Cache {
+            fn begin(&self) -> miniserde::ser::Fragment {
+                struct Map<V: miniserde::Serialize> {
+                    debug: V,
+                    release: V,
+                    pos: usize,
+                }
+
+                impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+                    fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                        match self.pos {
+                            0 => {
+                                self.pos += 1;
+                                Some((
+                                    Cow::Borrowed("debug"),
+                                    &self.debug as &dyn miniserde::Serialize,
+                                ))
+                            }
+                            1 => {
+                                self.pos += 1;
+                                Some((
+                                    Cow::Borrowed("release"),
+                                    &self.release as &dyn miniserde::Serialize,
+                                ))
+                            }
+                            _ => None,
+                        }
+                    }
+                }
+
+                miniserde::ser::Fragment::Map(Box::new(Map {
+                    debug: crate::ser::miniser_package_id_package_id_set_map(&self.debug),
+                    release: crate::ser::miniser_package_id_package_id_set_map(&self.release),
+                    pos: 0,
+                }))
             }
         }
     }
