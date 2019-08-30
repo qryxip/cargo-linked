@@ -164,7 +164,8 @@ impl OptUnused {
         let cargo =
             env::var_os("CARGO").ok_or_else(|| failure::err_msg("$CARGO is not present"))?;
 
-        let metadata = CargoMetadata::new(&cargo)
+        let metadata = CargoMetadata::new()
+            .cargo(Some(&cargo))
             .manifest_path(self.manifest_path.as_ref())
             .cwd(Some(&cwd))
             .ctrl_c(Some(&mut ctrl_c))

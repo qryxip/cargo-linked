@@ -6,7 +6,8 @@
 //! let ctrl_c = tokio_signal::ctrl_c();
 //! let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
 //!
-//! let metadata = CargoMetadata::new("cargo")
+//! let metadata = CargoMetadata::new()
+//!     .cargo(Some("cargo"))
 //!     .manifest_path(Some("./Cargo.toml"))
 //!     .cwd(Some("."))
 //!     .ctrl_c(Some(&mut ctrl_c))
@@ -1132,7 +1133,8 @@ impl ExecutableTarget {
 /// let ctrl_c = tokio_signal::ctrl_c();
 /// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
 ///
-/// let metadata = CargoMetadata::new("cargo")
+/// let metadata = CargoMetadata::new()
+///     .cargo(Some("cargo"))
 ///     .manifest_path(Some("./Cargo.toml"))
 ///     .cwd(Some("."))
 ///     .ctrl_c(Some(&mut ctrl_c))
@@ -1140,7 +1142,7 @@ impl ExecutableTarget {
 /// # failure::Fallible::Ok(())
 /// ```
 pub struct CargoMetadata<'a> {
-    cargo: OsString,
+    cargo: Option<OsString>,
     manifest_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
     ctrl_c: Option<&'a mut tokio_signal::IoStream<()>>,
@@ -1148,17 +1150,20 @@ pub struct CargoMetadata<'a> {
 
 impl CargoMetadata<'static> {
     /// Constructs a new `CargoMetadata`.
-    pub fn new<S: AsRef<OsStr>>(cargo: S) -> Self {
-        Self {
-            cargo: cargo.as_ref().to_owned(),
-            manifest_path: None,
-            cwd: None,
-            ctrl_c: None,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 impl CargoMetadata<'_> {
+    /// Sets `cargo`.
+    pub fn cargo<S: AsRef<OsStr>>(self, cargo: Option<S>) -> Self {
+        Self {
+            cargo: cargo.map(|s| s.as_ref().to_owned()),
+            ..self
+        }
+    }
+
     /// Sets `manifest_path`.
     pub fn manifest_path<P: AsRef<Path>>(self, manifest_path: Option<P>) -> Self {
         Self {
@@ -1192,13 +1197,23 @@ impl CargoMetadata<'_> {
     pub fn run(self) -> crate::Result<Metadata> {
         let mut rt =
             tokio::runtime::current_thread::Runtime::new().unwrap_or_else(|_| unimplemented!());
-        crate::process::cargo_metadata(
-            self.cargo,
-            self.manifest_path,
-            self.cwd,
-            &mut rt,
-            self.ctrl_c,
-        )
+        let cargo = self
+            .cargo
+            .clone()
+            .or_else(|| env::var_os("CARGO").map(Into::into))
+            .ok_or_else(|| crate::ErrorKind::CargoEnvVarNotPresent)?;
+        crate::process::cargo_metadata(&cargo, self.manifest_path, self.cwd, &mut rt, self.ctrl_c)
+    }
+}
+
+impl Default for CargoMetadata<'static> {
+    fn default() -> Self {
+        Self {
+            cargo: None,
+            manifest_path: None,
+            cwd: None,
+            ctrl_c: None,
+        }
     }
 }
 
@@ -1212,7 +1227,8 @@ impl CargoMetadata<'_> {
 /// let ctrl_c = tokio_signal::ctrl_c();
 /// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
 ///
-/// let metadata = CargoMetadata::new("cargo")
+/// let metadata = CargoMetadata::new()
+///     .cargo(Some("cargo"))
 ///     .manifest_path(Some("./Cargo.toml"))
 ///     .cwd(Some("."))
 ///     .ctrl_c(Some(&mut ctrl_c))
