@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::{env, process};
 
 fn main() -> io::Result<()> {
-    let Opt::Unused(opt) = Opt::from_args();
+    let opt = Opt::from_args();
 
-    let (termcolor_color, env_logger_color) = if opt.color.should_color(atty::Stream::Stderr) {
+    let (termcolor_color, env_logger_color) = if opt.color().should_color(atty::Stream::Stderr) {
         (
             termcolor::ColorChoice::Always,
             env_logger::WriteStyle::Always,
@@ -84,79 +84,81 @@ fn main() -> io::Result<()> {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(bin_name = "cargo")]
+#[structopt(author, about, bin_name = "cargo")]
 enum Opt {
-    #[structopt(name = "unused")]
-    Unused(OptUnused),
+    #[structopt(author, about, name = "unused")]
+    Unused {
+        #[structopt(long, help = "Run in debug mode")]
+        debug: bool,
+        #[structopt(
+            long,
+            value_name = "NAME",
+            conflicts_with_all(&["example", "test", "bench"]),
+            help = "Target `bin`",
+            display_order(1)
+        )]
+        bin: Option<String>,
+        #[structopt(
+            long,
+            value_name = "NAME",
+            conflicts_with_all(&["bin", "test", "bench"]),
+            help = "Target `example`",
+            display_order(2)
+        )]
+        example: Option<String>,
+        #[structopt(
+            long,
+            value_name = "NAME",
+            conflicts_with_all(&["bin", "example", "bench"]),
+            help = "Target `test`",
+            display_order(3)
+        )]
+        test: Option<String>,
+        #[structopt(
+            long,
+            value_name = "NAME",
+            conflicts_with_all(&["bin", "example", "test"]),
+            help = "Target `bench`",
+            display_order(4)
+        )]
+        bench: Option<String>,
+        #[structopt(
+            long,
+            value_name = "PATH",
+            parse(from_os_str),
+            help = "Path to Cargo.toml",
+            display_order(5)
+        )]
+        manifest_path: Option<PathBuf>,
+        #[structopt(
+            long,
+            value_name = "WHEN",
+            default_value(ColorChoice::default().into()),
+            possible_values(&ColorChoice::variants()),
+            help = "Coloring",
+            display_order(6)
+        )]
+        color: ColorChoice,
+    },
 }
 
-#[derive(Debug, StructOpt)]
-struct OptUnused {
-    #[structopt(long = "debug", help = "Run in debug mode")]
-    debug: bool,
-    #[structopt(
-        long = "bin",
-        value_name = "NAME",
-        help = "Target `bin`",
-        raw(
-            display_order = "1",
-            conflicts_with_all = r#"&["example", "test", "bench"]"#
-        )
-    )]
-    bin: Option<String>,
-    #[structopt(
-        long = "example",
-        value_name = "NAME",
-        help = "Target `example`",
-        raw(
-            display_order = "2",
-            conflicts_with_all = r#"&["bin", "test", "bench"]"#
-        )
-    )]
-    example: Option<String>,
-    #[structopt(
-        long = "test",
-        value_name = "NAME",
-        help = "Target `test`",
-        raw(
-            display_order = "3",
-            conflicts_with_all = r#"&["bin", "example", "bench"]"#
-        )
-    )]
-    test: Option<String>,
-    #[structopt(
-        long = "bench",
-        value_name = "NAME",
-        help = "Target `bench`",
-        raw(
-            display_order = "4",
-            conflicts_with_all = r#"&["bin", "example", "test"]"#
-        )
-    )]
-    bench: Option<String>,
-    #[structopt(
-        long = "manifest-path",
-        value_name = "PATH",
-        parse(from_os_str),
-        help = "Path to Cargo.toml",
-        raw(display_order = "5")
-    )]
-    manifest_path: Option<PathBuf>,
-    #[structopt(
-        long = "color",
-        value_name = "WHEN",
-        help = "Coloring",
-        raw(
-            display_order = "6",
-            default_value = "<&str>::from(ColorChoice::default())",
-            possible_values = "&ColorChoice::variants()"
-        )
-    )]
-    color: ColorChoice,
-}
+impl Opt {
+    fn color(&self) -> ColorChoice {
+        let Self::Unused { color, .. } = self;
+        *color
+    }
 
-impl OptUnused {
     fn run(&self) -> Fallible<String> {
+        let Self::Unused {
+            debug,
+            bin,
+            example,
+            test,
+            bench,
+            manifest_path,
+            ..
+        } = self;
+
         let ctrl_c = tokio_signal::ctrl_c();
         let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
 
@@ -166,18 +168,17 @@ impl OptUnused {
 
         let metadata = CargoMetadata::new()
             .cargo(Some(&cargo))
-            .manifest_path(self.manifest_path.as_ref())
+            .manifest_path(manifest_path.as_ref())
             .cwd(Some(&cwd))
             .ctrl_c(Some(&mut ctrl_c))
             .run()?;
 
-        let target =
-            ExecutableTarget::try_from_options(&self.bin, &self.example, &self.test, &self.bench);
+        let target = ExecutableTarget::try_from_options(&bin, &example, &test, &bench);
 
         let outcome = CargoUnused::new(&metadata)
             .target(target)
             .cargo(Some(cargo))
-            .debug(self.debug)
+            .debug(*debug)
             .ctrl_c(Some(&mut ctrl_c))
             .run()?;
         Ok(miniserde::json::to_string(&outcome))

@@ -42,14 +42,25 @@ OPTIONS:
 $ cargo unused --debug 2>&- | jq .unused
 [
   "cloudabi 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
+  "fuchsia-cprng 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "fuchsia-zircon 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+  "fuchsia-zircon-sys 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+  "kernel32-sys 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "mio-named-pipes 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miow 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+  "miow 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
+  "rdrand 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
   "redox_syscall 0.1.56 (registry+https://github.com/rust-lang/crates.io-index)",
-  "winapi 0.3.7 (registry+https://github.com/rust-lang/crates.io-index)",
+  "socket2 0.3.11 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.2.8 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)",
+  "winapi-build 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
   "winapi-i686-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
   "winapi-util 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
   "winapi-x86_64-pc-windows-gnu 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
-  "wincolor 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)"
+  "wincolor 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+  "ws2_32-sys 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)"
 ]
-
 ```
 
 ## License
