@@ -70,6 +70,8 @@ pub enum ErrorKind {
     WriteFile { path: PathBuf },
     #[display(fmt = "Failed to open {}", "path.display()")]
     OpenRw { path: PathBuf },
+    #[display(fmt = "Failed to lock {}", "path.display()")]
+    LockFile { path: PathBuf },
     #[display(fmt = "Failed to copy {} to {}", "from.display()", "to.display()")]
     CopyDir { from: PathBuf, to: PathBuf },
     #[display(fmt = "Failed to move {} to {}", "from.display()", "to.display()")]

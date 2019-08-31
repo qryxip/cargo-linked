@@ -44,10 +44,10 @@ pub use miniserde as miniserde_0_1;
 pub use serde as serde_1;
 pub use tokio_signal as tokio_signal_0_2;
 
+use crate::fs::ExclusivelyLockedJsonFile;
 use crate::process::Rustc;
 
 use cargo_metadata::{Metadata, Node, NodeDep, Package, PackageId};
-use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
 use indexmap::{indexset, IndexMap, IndexSet};
@@ -62,8 +62,6 @@ use std::borrow::{BorrowMut, Cow};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::OpenOptions;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -522,36 +520,8 @@ impl<'a> CargoUnused<'a, '_> {
                     .join("target")
                     .join("cargo_unused")
                     .join("cache.json");
-                let cache_file_exists = cache_path.exists();
-                let mut cache_file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(&cache_path)
-                    .with_context(|_| crate::ErrorKind::OpenRw {
-                        path: cache_path.clone(),
-                    })?;
-                let mut cache = "".to_owned();
-                cache_file.read_to_string(&mut cache).with_context(|_| {
-                    crate::ErrorKind::ReadFile {
-                        path: cache_path.clone(),
-                    }
-                })?;
-                let mut cache = if cache_file_exists {
-                    serde_json::from_str::<Cache>(&cache).with_context(|_| {
-                        crate::ErrorKind::ReadFile {
-                            path: cache_path.clone(),
-                        }
-                    })?
-                } else {
-                    let cache = Cache::default();
-                    cache_file
-                        .write_all(miniserde::json::to_string(&cache).as_ref())
-                        .with_context(|_| crate::ErrorKind::WriteFile {
-                            path: cache_path.clone(),
-                        })?;
-                    cache
-                };
+                let mut cache_file = ExclusivelyLockedJsonFile::<Cache>::open(&cache_path)?;
+                let mut cache = cache_file.read()?;
 
                 let mut used = hashset!(root.clone());
                 let mut cur = hashset!(root.clone());
@@ -598,12 +568,7 @@ impl<'a> CargoUnused<'a, '_> {
                 }
 
                 cache.sort(&packages);
-                let cache = miniserde::json::to_string(&cache);
-                cache_file
-                    .seek(SeekFrom::Start(0))
-                    .and_then(|_| cache_file.set_len(0))
-                    .and_then(|_| cache_file.write_all(cache.as_ref()))
-                    .with_context(|_| crate::ErrorKind::WriteFile { path: cache_path })?;
+                cache_file.write(&cache)?;
 
                 let mut used = used.into_iter().collect::<Vec<_>>();
                 let mut unused = packages
