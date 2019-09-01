@@ -52,7 +52,7 @@ use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
 use indexmap::{indexset, IndexMap, IndexSet};
 use log::{info, warn};
-use maplit::hashset;
+use maplit::{hashmap, hashset};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use semver::Version;
@@ -72,18 +72,18 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 #[derive(serde::Serialize)]
 pub struct Outcome {
     pub used: IndexSet<PackageId>,
-    pub unused: IndexSet<PackageId>,
+    pub unused: IndexMap<PackageId, OutcomeUnused>,
 }
 
 impl miniserde::Serialize for Outcome {
     fn begin(&self) -> miniserde::ser::Fragment {
-        struct Map<V: miniserde::Serialize> {
-            used: V,
-            unused: V,
+        struct Map<V1, V2> {
+            used: V1,
+            unused: V2,
             pos: usize,
         }
 
-        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+        impl<V1: miniserde::Serialize, V2: miniserde::Serialize> miniserde::ser::Map for Map<V1, V2> {
             fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
                 match self.pos {
                     0 => {
@@ -107,10 +107,45 @@ impl miniserde::Serialize for Outcome {
 
         miniserde::ser::Fragment::Map(Box::new(Map {
             used: crate::ser::miniser_package_id_set(&self.used),
-            unused: crate::ser::miniser_package_id_set(&self.unused),
+            unused: crate::ser::miniser_package_id_x_indexmap(&self.unused),
             pos: 0,
         }))
     }
+}
+#[derive(Debug, serde::Serialize)]
+pub struct OutcomeUnused {
+    pub by: IndexMap<PackageId, OutcomeUnusedBy>,
+}
+
+impl miniserde::Serialize for OutcomeUnused {
+    fn begin(&self) -> miniserde::ser::Fragment {
+        struct Map<V> {
+            by: V,
+            pos: usize,
+        }
+
+        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                if self.pos == 0 {
+                    self.pos = 1;
+                    Some(("by".into(), &self.by))
+                } else {
+                    None
+                }
+            }
+        }
+
+        miniserde::ser::Fragment::Map(Box::new(Map {
+            by: crate::ser::miniser_package_id_x_indexmap(&self.by),
+            pos: 0,
+        }))
+    }
+}
+
+#[derive(Debug, miniserde::Serialize, serde::Serialize)]
+pub struct OutcomeUnusedBy {
+    pub optional: bool,
+    pub platform: Option<String>,
 }
 
 /// `bin`, `example`, `test`, or `bench`.
@@ -350,6 +385,57 @@ impl<'a> CargoUnused<'a, '_> {
             .map(|n| (&n.id, n))
             .collect::<HashMap<_, _>>();
 
+        let conds = {
+            let mut conds = hashmap!();
+
+            for package in &metadata.packages {
+                let renamed = package
+                    .dependencies
+                    .iter()
+                    .flat_map(|d| d.rename.as_ref().map(|r| (r, d)))
+                    .collect::<HashMap<_, _>>();
+                let unrenamed = package
+                    .dependencies
+                    .iter()
+                    .filter(|d| d.rename.is_none())
+                    .map(|d| (d.name.as_str(), d))
+                    .collect::<HashMap<_, _>>();
+                let node = &nodes[&package.id];
+
+                for dep in &node.deps {
+                    let dependency = if let Some(dependency) = renamed.get(&dep.name) {
+                        dependency
+                    } else {
+                        static NAME: Lazy<Regex> = lazy_regex!(r"\A([a-zA-Z0-9_-]+).*\z");
+                        let name = &NAME
+                            .captures(&dep.pkg.repr)
+                            .unwrap_or_else(|| unimplemented!())[1];
+                        unrenamed.get(name).unwrap_or_else(|| unimplemented!())
+                    };
+
+                    let value = OutcomeUnusedBy {
+                        optional: dependency.optional,
+                        platform: dependency.target.as_ref().map(ToString::to_string),
+                    };
+
+                    conds
+                        .entry(&dep.pkg)
+                        .or_insert_with(IndexMap::new)
+                        .insert(package.id.clone(), value);
+                }
+            }
+
+            for value in conds.values_mut() {
+                fn ordkey<'a>(package: &'a Package) -> impl Ord + 'a {
+                    (&package.name, &package.version, &package.id)
+                }
+
+                value.sort_by(|id1, _, id2, _| ordkey(&packages[id1]).cmp(&ordkey(&packages[id2])));
+            }
+
+            conds
+        };
+
         let src_paths = {
             let mut src_paths = metadata
                 .packages
@@ -479,6 +565,7 @@ impl<'a> CargoUnused<'a, '_> {
             packages: &packages,
             root,
             nodes: &nodes,
+            conds,
             src_paths: &src_paths,
             root_manifest_dir,
             rustcs: &rustcs,
@@ -497,6 +584,7 @@ impl<'a> CargoUnused<'a, '_> {
             packages: &'b HashMap<&'a PackageId, &'a Package>,
             root: &'a PackageId,
             nodes: &'b HashMap<&'a PackageId, &'a Node>,
+            conds: HashMap<&'a PackageId, IndexMap<PackageId, OutcomeUnusedBy>>,
             src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Path; 1]>>,
             root_manifest_dir: &'a Path,
             rustcs: &'b HashMap<PathBuf, Rustc>,
@@ -511,6 +599,7 @@ impl<'a> CargoUnused<'a, '_> {
                     packages,
                     root,
                     nodes,
+                    mut conds,
                     src_paths,
                     root_manifest_dir,
                     rustcs,
@@ -586,7 +675,15 @@ impl<'a> CargoUnused<'a, '_> {
 
                 Ok(Outcome {
                     used: used.into_iter().collect(),
-                    unused: unused.into_iter().collect(),
+                    unused: unused
+                        .into_iter()
+                        .map(|unused| {
+                            let value = OutcomeUnused {
+                                by: conds.remove(&unused).unwrap_or_default(),
+                            };
+                            (unused, value)
+                        })
+                        .collect(),
                 })
             }
         }

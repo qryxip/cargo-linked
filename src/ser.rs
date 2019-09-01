@@ -61,3 +61,33 @@ pub(crate) fn miniser_package_id_package_id_set_map<'a>(
 
     Serializer(map)
 }
+
+pub(crate) fn miniser_package_id_x_indexmap<'a, V: miniserde::Serialize>(
+    map: &'a IndexMap<PackageId, V>,
+) -> impl miniserde::Serialize + 'a {
+    struct Serializer<'a, V>(&'a IndexMap<PackageId, V>);
+
+    impl<'a, V: miniserde::Serialize> miniserde::Serialize for Serializer<'a, V> {
+        fn begin(&self) -> miniserde::ser::Fragment {
+            miniserde::ser::Fragment::Map(Box::new(Map {
+                pairs: self.0.iter().map(|(k, v)| (k.repr.deref(), v)).collect(),
+                pos: 0,
+            }))
+        }
+    }
+
+    struct Map<'a, V: miniserde::Serialize + 'a> {
+        pairs: Vec<(&'a str, V)>,
+        pos: usize,
+    }
+
+    impl<'a, V: miniserde::Serialize + 'a> miniserde::ser::Map for Map<'a, V> {
+        fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+            let (key, values) = self.pairs.get(self.pos)?;
+            self.pos += 1;
+            Some(((*key).into(), values))
+        }
+    }
+
+    Serializer(map)
+}
