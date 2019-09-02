@@ -4,21 +4,24 @@ use cargo_metadata::Metadata;
 use derive_more::Display;
 use failure::{Fail as _, ResultExt as _};
 use fixedbitset::FixedBitSet;
+use futures01::Stream as _;
 use if_chain::if_chain;
 use itertools::Itertools as _;
 use log::info;
+use maplit::btreemap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use structopt::StructOpt;
+use tokio::io::AsyncRead as _;
 use tokio_process::{CommandExt as _, OutputAsync};
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::ops::{Deref, Range};
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 use std::str::FromStr;
-use std::{fmt, iter};
+use std::{fmt, mem, str, thread};
 
 pub(crate) fn cargo_metadata(
     cargo: impl AsRef<OsStr>,
@@ -37,14 +40,10 @@ pub(crate) fn cargo_metadata(
         args.push(manifest_path.as_ref().as_ref());
     }
 
-    let (_, stdout, _) = await_command::<(ExitStatusSuccess, String, ()), _, _, _, _, _, _, _>(
-        cargo,
-        &args,
-        iter::empty::<(&'static str, &'static str)>(),
-        cwd,
-        rt,
-        ctrl_c,
-    )?;
+    let (_, stdout, _) = ProcessBuilder::new(cargo)
+        .args(args)
+        .cwd(cwd)
+        .wait_with_output::<(ExitStatusSuccess, String, ())>(rt, ctrl_c)?;
 
     crate::fs::from_json(&stdout, "`cargo metadata` output")
 }
@@ -84,15 +83,10 @@ pub(crate) fn cargo_build_vv(
         }
     }
 
-    let (ExitStatusSuccess, (), stderr) = await_command(
-        cargo,
-        &args,
-        iter::empty::<(&'static str, &'static str)>(),
-        Some(manifest_dir),
-        rt,
-        ctrl_c,
-    )?;
-    Ok(stderr)
+    ProcessBuilder::new(cargo)
+        .args(args)
+        .cwd(Some(manifest_dir))
+        .wait_stderr_broadcasting(rt, ctrl_c)
 }
 
 #[derive(Debug)]
@@ -136,15 +130,12 @@ impl Rustc {
         rt: &mut tokio::runtime::current_thread::Runtime,
         ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
     ) -> crate::Result<(bool, String)> {
-        await_command(
-            &self.arg0,
-            &self.opts.to_args(&exclude),
-            &self.envs,
-            Some(&self.workspace_root),
-            rt,
-            ctrl_c,
-        )
-        .map(|(success, (), stderr)| (success, stderr))
+        ProcessBuilder::new(&self.arg0)
+            .args(&self.opts.to_args(&exclude))
+            .envs(&self.envs)
+            .cwd(Some(&self.workspace_root))
+            .wait_with_output::<(bool, (), String)>(rt, ctrl_c)
+            .map(|(success, _, stderr)| (success, stderr))
     }
 }
 
@@ -366,122 +357,265 @@ impl Deref for Extern {
     }
 }
 
-fn await_command<
-    O: ProcessedOutput,
-    S1: AsRef<OsStr>,
-    S2: AsRef<OsStr>,
-    A: Clone + IntoIterator<Item = S2>,
-    K: AsRef<str> + AsRef<OsStr>,
-    V: AsRef<str> + AsRef<OsStr>,
-    E: Clone + IntoIterator<Item = (K, V)>,
-    P: AsRef<Path>,
->(
-    arg0: S1,
-    args: A,
-    envs: E,
-    cwd: Option<P>,
-    rt: &mut tokio::runtime::current_thread::Runtime,
-    ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
-) -> crate::Result<O> {
-    struct OutputWithCtrlC<'a, 'b> {
-        arg0: &'a OsStr,
-        output: OutputAsync,
-        ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+struct ProcessBuilder {
+    arg0: OsString,
+    args: Vec<OsString>,
+    envs: BTreeMap<String, String>,
+    cwd: Option<PathBuf>,
+}
+
+impl ProcessBuilder {
+    fn new(arg0: impl AsRef<OsStr>) -> Self {
+        Self {
+            arg0: arg0.as_ref().to_owned(),
+            args: vec![],
+            envs: btreemap!(),
+            cwd: None,
+        }
     }
 
-    impl futures01::Future for OutputWithCtrlC<'_, '_> {
-        type Item = std::process::Output;
-        type Error = crate::Error;
+    fn args<S: AsRef<OsStr>, I: IntoIterator<Item = S>>(mut self, args: I) -> Self {
+        let args = args.into_iter().map(|s| s.as_ref().to_owned());
+        self.args.extend(args);
+        self
+    }
 
-        fn poll(&mut self) -> futures01::Poll<std::process::Output, crate::Error> {
-            if_chain! {
-                if let Some(ctrl_c) = &mut self.ctrl_c;
-                let ctrl_c = ctrl_c
-                    .poll()
-                    .map_err(|e| e.context(crate::ErrorKind::Tokio))?;
-                if ctrl_c.is_ready();
-                then {
-                    Err(crate::ErrorKind::CtrlC.into())
-                } else {
-                    match self.output.poll() {
-                        Ok(futures01::Async::NotReady) => Ok(futures01::Async::NotReady),
-                        Ok(futures01::Async::Ready(output)) => Ok(futures01::Async::Ready(output)),
-                        Err(err) => {
-                            let arg0 = self.arg0.to_owned();
-                            Err(err.context(crate::ErrorKind::Command{ arg0 }).into())
+    fn envs<K: AsRef<str>, V: AsRef<str>, I: IntoIterator<Item = (K, V)>>(
+        mut self,
+        envs: I,
+    ) -> Self {
+        let envs = envs
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_owned(), v.as_ref().to_owned()));
+        self.envs.extend(envs);
+        self
+    }
+
+    fn cwd(self, cwd: Option<impl AsRef<Path>>) -> Self {
+        Self {
+            cwd: cwd.map(|p| p.as_ref().to_owned()),
+            ..self
+        }
+    }
+
+    fn wait_with_output<O: ProcessedOutput>(
+        self,
+        rt: &mut tokio::runtime::current_thread::Runtime,
+        ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
+    ) -> crate::Result<O> {
+        struct OutputWithCtrlC<'a, 'b> {
+            arg0: &'a OsStr,
+            output: OutputAsync,
+            ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+        }
+
+        impl futures01::Future for OutputWithCtrlC<'_, '_> {
+            type Item = std::process::Output;
+            type Error = crate::Error;
+
+            fn poll(&mut self) -> futures01::Poll<std::process::Output, crate::Error> {
+                if_chain! {
+                    if let Some(ctrl_c) = &mut self.ctrl_c;
+                    let ctrl_c = ctrl_c.poll().with_context(|_| crate::ErrorKind::Tokio)?;
+                    if ctrl_c.is_ready();
+                    then {
+                        Err(crate::ErrorKind::CtrlC.into())
+                    } else {
+                        match self.output.poll() {
+                            Ok(futures01::Async::NotReady) => Ok(futures01::Async::NotReady),
+                            Ok(futures01::Async::Ready(output)) => Ok(futures01::Async::Ready(output)),
+                            Err(err) => {
+                                let arg0 = self.arg0.to_owned();
+                                Err(err.context(crate::ErrorKind::Command{ arg0 }).into())
+                            }
                         }
                     }
                 }
             }
         }
+
+        let output = self
+            .command(O::IGNORE_STDOUT, O::IGNORE_STDERR)?
+            .output_async();
+        let output = rt.block_on(OutputWithCtrlC {
+            arg0: &self.arg0,
+            output,
+            ctrl_c,
+        })?;
+
+        info!("{}", output.status);
+
+        O::process(&self.arg0, output)
     }
 
-    #[cfg(windows)]
-    fn fmt_env(
-        key: &str,
-        val: &str,
-        f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
-    ) -> fmt::Result {
-        let val = shell_escape::escape(val.into());
-        f(&format_args!("set {}={}&& ", key, val))
-    }
+    fn wait_stderr_broadcasting(
+        self,
+        rt: &mut tokio::runtime::current_thread::Runtime,
+        ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
+    ) -> crate::Result<String> {
+        struct Wait<'a, 'b> {
+            arg0: &'a OsStr,
+            child: tokio_process::Child,
+            child_stderr: tokio_process::ChildStderr,
+            stderr_buf: Vec<u8>,
+            stderr_pos: usize,
+            lines_tx: futures01::sync::mpsc::UnboundedSender<String>,
+            ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+        }
 
-    #[cfg(unix)]
-    fn fmt_env(
-        key: &str,
-        val: &str,
-        f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
-    ) -> fmt::Result {
-        let val = shell_escape::escape(val.into());
-        f(&format_args!("{}={} ", key, val))
-    }
+        impl<'a, 'b> futures01::Future for Wait<'a, 'b> {
+            type Item = (ExitStatus, Vec<u8>);
+            type Error = crate::Error;
 
-    fn null_or_piped(ignore: bool) -> Stdio {
-        if ignore {
-            Stdio::null()
+            fn poll(&mut self) -> futures01::Poll<(ExitStatus, Vec<u8>), crate::Error> {
+                if let Some(ctrl_c) = &mut self.ctrl_c {
+                    let ctrl_c = ctrl_c.poll().with_context(|_| crate::ErrorKind::Tokio)?;
+                    if ctrl_c.is_ready() {
+                        return Err(crate::ErrorKind::CtrlC.into());
+                    }
+                }
+
+                let _ = futures01::try_ready!(self
+                    .child_stderr
+                    .read_buf(&mut self.stderr_buf)
+                    .with_context(|_| crate::ErrorKind::Command {
+                        arg0: self.arg0.to_owned()
+                    }));
+
+                if let Some(lf_pos) =
+                    (self.stderr_pos..self.stderr_buf.len()).find(|&i| self.stderr_buf[i] == b'\n')
+                {
+                    let line = str::from_utf8(&self.stderr_buf[self.stderr_pos..lf_pos])
+                        .unwrap_or_else(|e| unimplemented!("{:?}", e))
+                        .to_owned();
+                    let _ = self.lines_tx.unbounded_send(line);
+                    self.stderr_pos = lf_pos + 1;
+                }
+
+                let status = futures01::try_ready!(self.child.poll().with_context(|_| {
+                    crate::ErrorKind::Command {
+                        arg0: self.arg0.to_owned(),
+                    }
+                }));
+                let stderr = mem::replace(&mut self.stderr_buf, vec![]);
+                Ok(futures01::Async::Ready((status, stderr)))
+            }
+        }
+
+        let (lines_tx, lines_rx) = futures01::sync::mpsc::unbounded();
+
+        let handle = thread::Builder::new()
+            .name("cargo-unused-process-wait-stderr-broadcasting".to_owned())
+            .spawn(move || {
+                info!("==========STDERR==========");
+                if let Ok(mut rt) = tokio::runtime::current_thread::Runtime::new() {
+                    let _ = rt.block_on(lines_rx.for_each(|line| {
+                        info!("{}", line);
+                        Ok(())
+                    }));
+                }
+                info!("==========================");
+            });
+
+        let mut child = self
+            .command(true, false)?
+            .spawn_async()
+            .unwrap_or_else(|e| unimplemented!("{:?}", e));
+
+        let (status, stderr) = rt.block_on(Wait {
+            arg0: &self.arg0,
+            child_stderr: child.stderr().take().unwrap(),
+            child,
+            stderr_buf: vec![],
+            stderr_pos: 0,
+            lines_tx,
+            ctrl_c,
+        })?;
+
+        if let Ok(handle) = handle {
+            let _ = handle.join();
+        }
+
+        info!("{}", status);
+
+        if status.success() {
+            String::from_utf8(stderr)
+                .with_context(|_| {
+                    let arg0_filename = Path::new(&self.arg0)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_owned();
+                    crate::ErrorKind::NonUtf8Output { arg0_filename }
+                })
+                .map_err(Into::into)
         } else {
-            Stdio::piped()
+            let arg0 = self.arg0.clone();
+            Err(failure::err_msg(status)
+                .context(crate::ErrorKind::Command { arg0 })
+                .into())
         }
     }
 
-    let arg0 = arg0.as_ref();
-    let cwd = cwd
-        .map(|cwd| Ok(cwd.as_ref().to_owned()))
-        .unwrap_or_else(crate::fs::current_dir)?;
+    fn command(
+        &self,
+        ignore_stdout: bool,
+        ignore_stderr: bool,
+    ) -> crate::Result<std::process::Command> {
+        #[cfg(windows)]
+        fn fmt_env(
+            key: &str,
+            val: &str,
+            f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
+        ) -> fmt::Result {
+            let val = shell_escape::escape(val.into());
+            f(&format_args!("set {}={}&& ", key, val))
+        }
 
-    info!(
-        "`{}{}{}` in {}",
-        envs.clone()
-            .into_iter()
-            .format_with("", |(k, v), f| fmt_env(k.as_ref(), v.as_ref(), f)),
-        arg0.to_string_lossy(),
-        args.clone()
-            .into_iter()
-            .format_with("", |s, f| f(&format_args!(
-                " {}",
-                s.as_ref().to_string_lossy(),
-            ))),
-        cwd.display(),
-    );
+        #[cfg(unix)]
+        fn fmt_env(
+            key: &str,
+            val: &str,
+            f: &mut dyn FnMut(&dyn fmt::Display) -> fmt::Result,
+        ) -> fmt::Result {
+            let val = shell_escape::escape(val.into());
+            f(&format_args!("{}={} ", key, val))
+        }
 
-    let output = std::process::Command::new(arg0)
-        .args(args)
-        .envs(envs)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(null_or_piped(O::IGNORE_STDOUT))
-        .stderr(null_or_piped(O::IGNORE_STDERR))
-        .output_async();
+        fn null_or_piped(ignore: bool) -> Stdio {
+            if ignore {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            }
+        }
 
-    let output = rt.block_on(OutputWithCtrlC {
-        arg0,
-        output,
-        ctrl_c,
-    })?;
+        let cwd = self
+            .cwd
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(crate::fs::current_dir)?;
 
-    info!("{}", output.status);
+        info!(
+            "`{}{}{}` in {}",
+            self.envs
+                .iter()
+                .format_with("", |(k, v), f| fmt_env(k, v, f)),
+            self.arg0.to_string_lossy(),
+            self.args
+                .iter()
+                .format_with("", |s, f| f(&format_args!(" {}", s.to_string_lossy()))),
+            cwd.display(),
+        );
 
-    O::process(arg0, output)
+        let mut cmd = std::process::Command::new(&self.arg0);
+        cmd.args(&self.args)
+            .envs(&self.envs)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(null_or_piped(ignore_stdout))
+            .stderr(null_or_piped(ignore_stderr));
+        Ok(cmd)
+    }
 }
 
 struct ExitStatusSuccess;
