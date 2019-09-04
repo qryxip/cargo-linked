@@ -45,10 +45,6 @@ $ cargo unused --debug 2>&- | jq .unused
 {
   "cloudabi 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)": {
     "by": {
-      "parking_lot_core 0.6.2 (registry+https://github.com/rust-lang/crates.io-index)": {
-        "optional": false,
-        "platform": "cfg(target_os = \"cloudabi\")"
-      },
       "rand_os 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)": {
         "optional": false,
         "platform": "cfg(target_os = \"cloudabi\")"
@@ -133,10 +129,6 @@ $ cargo unused --debug 2>&- | jq .unused
         "optional": false,
         "platform": "cfg(target_os = \"redox\")"
       },
-      "parking_lot_core 0.6.2 (registry+https://github.com/rust-lang/crates.io-index)": {
-        "optional": false,
-        "platform": "cfg(target_os = \"redox\")"
-      },
       "socket2 0.3.11 (registry+https://github.com/rust-lang/crates.io-index)": {
         "optional": false,
         "platform": "cfg(target_os = \"redox\")"
@@ -206,10 +198,6 @@ $ cargo unused --debug 2>&- | jq .unused
         "platform": "cfg(windows)"
       },
       "parking_lot_core 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)": {
-        "optional": false,
-        "platform": "cfg(windows)"
-      },
-      "parking_lot_core 0.6.2 (registry+https://github.com/rust-lang/crates.io-index)": {
         "optional": false,
         "platform": "cfg(windows)"
       },
@@ -304,7 +292,6 @@ $ cargo unused --debug 2>&- | jq .unused
     }
   }
 }
-
 ```
 
 ### `lib`

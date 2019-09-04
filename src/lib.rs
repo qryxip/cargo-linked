@@ -31,6 +31,7 @@ macro_rules! lazy_regex {
 mod error;
 mod fs;
 mod parse;
+mod path;
 mod process;
 mod ser;
 
@@ -45,6 +46,7 @@ pub use serde as serde_1;
 pub use tokio_signal as tokio_signal_0_2;
 
 use crate::fs::ExclusivelyLockedJsonFile;
+use crate::path::{Utf8Path, Utf8PathBuf};
 use crate::process::Rustc;
 
 use cargo_metadata::{Metadata, Node, NodeDep, Package, PackageId};
@@ -58,8 +60,8 @@ use regex::Regex;
 use semver::Version;
 use smallvec::SmallVec;
 
-use std::borrow::{BorrowMut, Cow};
-use std::collections::{HashMap, HashSet};
+use std::borrow::BorrowMut;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
@@ -75,77 +77,69 @@ pub struct Outcome {
     pub unused: IndexMap<PackageId, OutcomeUnused>,
 }
 
-impl miniserde::Serialize for Outcome {
-    fn begin(&self) -> miniserde::ser::Fragment {
-        struct Map<V1, V2> {
-            used: V1,
-            unused: V2,
-            pos: usize,
-        }
-
-        impl<V1: miniserde::Serialize, V2: miniserde::Serialize> miniserde::ser::Map for Map<V1, V2> {
-            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
-                match self.pos {
-                    0 => {
-                        self.pos += 1;
-                        Some((
-                            Cow::Borrowed("used"),
-                            &self.used as &dyn miniserde::Serialize,
-                        ))
-                    }
-                    1 => {
-                        self.pos += 1;
-                        Some((
-                            Cow::Borrowed("unused"),
-                            &self.unused as &dyn miniserde::Serialize,
-                        ))
-                    }
-                    _ => None,
-                }
-            }
-        }
-
-        miniserde::ser::Fragment::Map(Box::new(Map {
-            used: crate::ser::miniser_package_id_set(&self.used),
-            unused: crate::ser::miniser_package_id_x_indexmap(&self.unused),
-            pos: 0,
-        }))
-    }
-}
 #[derive(Debug, serde::Serialize)]
 pub struct OutcomeUnused {
     pub by: IndexMap<PackageId, OutcomeUnusedBy>,
-}
-
-impl miniserde::Serialize for OutcomeUnused {
-    fn begin(&self) -> miniserde::ser::Fragment {
-        struct Map<V> {
-            by: V,
-            pos: usize,
-        }
-
-        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
-            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
-                if self.pos == 0 {
-                    self.pos = 1;
-                    Some(("by".into(), &self.by))
-                } else {
-                    None
-                }
-            }
-        }
-
-        miniserde::ser::Fragment::Map(Box::new(Map {
-            by: crate::ser::miniser_package_id_x_indexmap(&self.by),
-            pos: 0,
-        }))
-    }
 }
 
 #[derive(Debug, miniserde::Serialize, serde::Serialize)]
 pub struct OutcomeUnusedBy {
     pub optional: bool,
     pub platform: Option<String>,
+}
+
+#[derive(Default, miniserde::Serialize, serde::Deserialize)]
+struct Cache {
+    debug: CacheByMode,
+    release: CacheByMode,
+}
+
+impl Cache {
+    fn get(&self, debug: bool) -> &CacheByMode {
+        if debug {
+            &self.debug
+        } else {
+            &self.release
+        }
+    }
+
+    fn get_mut(&mut self, debug: bool) -> &mut CacheByMode {
+        if debug {
+            &mut self.debug
+        } else {
+            &mut self.release
+        }
+    }
+
+    fn sort(&mut self, packages: &HashMap<&PackageId, &Package>) {
+        fn ordkey(package: &Package) -> (&str, &Version, &PackageId) {
+            (&package.name, &package.version, &package.id)
+        }
+
+        let sort_targets = |targets: &mut BTreeMap<Utf8PathBuf, IndexSet<PackageId>>| {
+            for values in targets.values_mut() {
+                values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
+            }
+        };
+
+        let sort_dependencies = |dependencies: &mut IndexMap<PackageId, IndexSet<PackageId>>| {
+            for values in dependencies.values_mut() {
+                values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
+            }
+            dependencies.sort_by(|x, _, y, _| ordkey(packages[x]).cmp(&ordkey(packages[y])));
+        };
+
+        sort_targets(&mut self.debug.targets);
+        sort_targets(&mut self.release.targets);
+        sort_dependencies(&mut self.debug.dependencies);
+        sort_dependencies(&mut self.release.dependencies);
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+struct CacheByMode {
+    targets: BTreeMap<Utf8PathBuf, IndexSet<PackageId>>,
+    dependencies: IndexMap<PackageId, IndexSet<PackageId>>,
 }
 
 /// `bin`, `example`, `test`, or `bench`.
@@ -250,8 +244,8 @@ impl CargoMetadata<'_> {
 
     /// Executes `cargo metadata`.
     pub fn run(self) -> crate::Result<Metadata> {
-        let mut rt =
-            tokio::runtime::current_thread::Runtime::new().unwrap_or_else(|_| unimplemented!());
+        let mut rt = tokio::runtime::current_thread::Runtime::new()
+            .unwrap_or_else(|e| unimplemented!("{:?}", e));
         let cargo = self
             .cargo
             .clone()
@@ -361,8 +355,8 @@ impl<'a> CargoUnused<'a, '_> {
             .ok_or_else(|| crate::ErrorKind::CargoEnvVarNotPresent)?;
 
         let mut ctrl_c = self.ctrl_c;
-        let mut rt =
-            tokio::runtime::current_thread::Runtime::new().unwrap_or_else(|_| unimplemented!());
+        let mut rt = tokio::runtime::current_thread::Runtime::new()
+            .unwrap_or_else(|e| unimplemented!("{:?}", e));
 
         let packages = metadata
             .packages
@@ -436,76 +430,71 @@ impl<'a> CargoUnused<'a, '_> {
             conds
         };
 
-        let src_paths = {
-            let mut src_paths = metadata
-                .packages
-                .iter()
-                .map(|package| {
-                    let values = package
-                        .targets
-                        .iter()
-                        .filter(|target| {
-                            target
-                                .kind
-                                .iter()
-                                .any(|k| ["lib", "proc-macro", "custom-build"].contains(&k.deref()))
-                        })
-                        .map(|t| &*t.src_path)
-                        .collect();
-                    (&package.id, values)
-                })
-                .collect::<HashMap<_, SmallVec<[_; 1]>>>();
-            let root_bin_src_path = match target {
-                Some(target) => {
-                    let (name, kind) = match target {
-                        ExecutableTarget::Bin(name) => (name, "bin"),
-                        ExecutableTarget::Example(name) => (name, "example"),
-                        ExecutableTarget::Test(name) => (name, "test"),
-                        ExecutableTarget::Bench(name) => (name, "bench"),
-                    };
+        let root_bin_src_path = match target {
+            Some(target) => {
+                let (name, kind) = match target {
+                    ExecutableTarget::Bin(name) => (name, "bin"),
+                    ExecutableTarget::Example(name) => (name, "example"),
+                    ExecutableTarget::Test(name) => (name, "test"),
+                    ExecutableTarget::Bench(name) => (name, "bench"),
+                };
+                &*packages[root]
+                    .targets
+                    .iter()
+                    .find(|t| t.name == *name && t.kind.contains(&kind.to_owned()))
+                    .ok_or_else(|| {
+                        let name = name.clone();
+                        crate::ErrorKind::NoSuchTarget { kind, name }
+                    })?
+                    .src_path
+            }
+            None => {
+                let bins = packages[root]
+                    .targets
+                    .iter()
+                    .filter(|t| t.kind.iter().any(|k| k == "bin"))
+                    .collect::<Vec<_>>();
+                if bins.len() == 1 {
+                    &bins[0].src_path
+                } else {
+                    let default_run =
+                        crate::fs::read_toml::<CargoToml>(&packages[root].manifest_path)?
+                            .package
+                            .default_run
+                            .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
                     &*packages[root]
                         .targets
                         .iter()
-                        .find(|t| t.name == *name && t.kind.contains(&kind.to_owned()))
+                        .find(|t| t.name == default_run && t.kind.contains(&"bin".to_owned()))
                         .ok_or_else(|| {
-                            let name = name.clone();
+                            let (kind, name) = ("bin", default_run.clone());
                             crate::ErrorKind::NoSuchTarget { kind, name }
                         })?
                         .src_path
                 }
-                None => {
-                    let bins = packages[root]
-                        .targets
-                        .iter()
-                        .filter(|t| t.kind.iter().any(|k| k == "bin"))
-                        .collect::<Vec<_>>();
-                    if bins.len() == 1 {
-                        &bins[0].src_path
-                    } else {
-                        let default_run =
-                            crate::fs::read_toml::<CargoToml>(&packages[root].manifest_path)?
-                                .package
-                                .default_run
-                                .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
-                        &*packages[root]
-                            .targets
-                            .iter()
-                            .find(|t| t.name == default_run && t.kind.contains(&"bin".to_owned()))
-                            .ok_or_else(|| {
-                                let (kind, name) = ("bin", default_run.clone());
-                                crate::ErrorKind::NoSuchTarget { kind, name }
-                            })?
-                            .src_path
-                    }
-                }
-            };
-            src_paths
-                .entry(root)
-                .and_modify(|ps| ps.push(root_bin_src_path))
-                .or_insert_with(|| [root_bin_src_path].into());
-
-            src_paths
+            }
         };
+        let root_bin_src_path =
+            Utf8Path::new(root_bin_src_path.to_str().expect("this is from a JSON"));
+
+        let dep_src_paths = metadata
+            .packages
+            .iter()
+            .map(|package| {
+                let values = package
+                    .targets
+                    .iter()
+                    .filter(|target| {
+                        target
+                            .kind
+                            .iter()
+                            .any(|k| ["lib", "proc-macro", "custom-build"].contains(&k.deref()))
+                    })
+                    .map(|t| Utf8Path::new(t.src_path.to_str().expect("this is from a JSON")))
+                    .collect();
+                (&package.id, values)
+            })
+            .collect::<HashMap<_, SmallVec<[_; 1]>>>();
 
         let root_manifest_dir = packages[root]
             .manifest_path
@@ -539,7 +528,11 @@ impl<'a> CargoUnused<'a, '_> {
             parse::cargo_build_vv_stderr_to_opts_and_envs(&stderr)?
                 .into_iter()
                 .map(|(envs, opts)| {
-                    let rustc = Rustc::new(rustc.as_ref(), opts, envs, &metadata.workspace_root);
+                    let workspace_root = metadata
+                        .workspace_root
+                        .to_str()
+                        .expect("this is from a JSON");
+                    let rustc = Rustc::new(rustc.as_ref(), opts, envs, workspace_root);
                     (rustc.input_abs().to_owned(), rustc)
                 })
                 .collect::<HashMap<_, _>>()
@@ -566,7 +559,8 @@ impl<'a> CargoUnused<'a, '_> {
             root,
             nodes: &nodes,
             conds,
-            src_paths: &src_paths,
+            root_bin_src_path,
+            dep_src_paths: &dep_src_paths,
             root_manifest_dir,
             rustcs: &rustcs,
         }
@@ -585,9 +579,10 @@ impl<'a> CargoUnused<'a, '_> {
             root: &'a PackageId,
             nodes: &'b HashMap<&'a PackageId, &'a Node>,
             conds: HashMap<&'a PackageId, IndexMap<PackageId, OutcomeUnusedBy>>,
-            src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Path; 1]>>,
+            root_bin_src_path: &'a Utf8Path,
+            dep_src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Utf8Path; 1]>>,
             root_manifest_dir: &'a Path,
-            rustcs: &'b HashMap<PathBuf, Rustc>,
+            rustcs: &'b HashMap<Utf8PathBuf, Rustc>,
         }
 
         impl Context<'_, '_> {
@@ -600,7 +595,8 @@ impl<'a> CargoUnused<'a, '_> {
                     root,
                     nodes,
                     mut conds,
-                    src_paths,
+                    root_bin_src_path,
+                    dep_src_paths,
                     root_manifest_dir,
                     rustcs,
                 } = self;
@@ -612,16 +608,48 @@ impl<'a> CargoUnused<'a, '_> {
                 let mut cache_file = ExclusivelyLockedJsonFile::<Cache>::open(&cache_path)?;
                 let mut cache = cache_file.read()?;
 
-                let mut used = hashset!(root.clone());
-                let mut cur = hashset!(root.clone());
+                let (mut cur, mut used) = if let Some(rustc) = rustcs.get(root_bin_src_path) {
+                    let (mut cur, mut used) = (hashset!(), hashset!());
+                    let cache = cache
+                        .get_mut(debug)
+                        .targets
+                        .entry(root_bin_src_path.to_owned())
+                        .and_modify(IndexSet::clear)
+                        .or_insert_with(IndexSet::new);
+                    let root_lib = packages[root]
+                        .targets
+                        .iter()
+                        .find(|t| t.kind.contains(&"lib".to_owned()))
+                        .map(|t| (&*t.name, root));
+                    let output = filter_actually_used_crates(
+                        rustc,
+                        &nodes[root].deps,
+                        root_lib,
+                        &mut rt,
+                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
+                    )?;
+                    for &output in &output {
+                        cur.insert(output.clone());
+                        used.insert(output.clone());
+                        cache.insert(output.clone());
+                    }
+                    (cur, used)
+                } else if let Some(bin_deps) = cache.get(debug).targets.get(root_bin_src_path) {
+                    let bin_deps = bin_deps.iter().cloned().collect::<HashSet<_>>();
+                    (bin_deps.clone(), bin_deps)
+                } else {
+                    return Err(crate::Error::from(crate::ErrorKind::UnexpectedSrcPath {
+                        src_path: root_bin_src_path.to_owned().into(),
+                    }));
+                };
 
                 while !cur.is_empty() {
                     let mut next = hashset!();
                     for cur in cur {
-                        if src_paths[&cur].iter().any(|&p| rustcs.contains_key(p)) {
-                            cache.get_mut(debug).remove(&cur);
+                        if dep_src_paths[&cur].iter().any(|&p| rustcs.contains_key(p)) {
+                            cache.get_mut(debug).dependencies.remove(&cur);
                         }
-                        match cache.entry(debug, &cur) {
+                        match cache.get_mut(debug).dependencies.entry(cur.clone()) {
                             indexmap::map::Entry::Occupied(cache) => {
                                 for id in cache.get() {
                                     if used.insert(id.clone()) {
@@ -631,15 +659,16 @@ impl<'a> CargoUnused<'a, '_> {
                             }
                             indexmap::map::Entry::Vacant(cache) => {
                                 let cache = cache.insert(indexset!());
-                                for &src_path in &src_paths[&cur] {
-                                    let rustc = rustcs.get(src_path).ok_or_else(|| {
+                                for &dep_src_path in &dep_src_paths[&cur] {
+                                    let rustc = rustcs.get(dep_src_path).ok_or_else(|| {
                                         crate::ErrorKind::UnexpectedSrcPath {
-                                            src_path: src_path.to_owned(),
+                                            src_path: dep_src_path.to_owned().into(),
                                         }
                                     })?;
                                     let output = filter_actually_used_crates(
                                         rustc,
                                         &nodes[&cur].deps,
+                                        None,
                                         &mut rt,
                                         ctrl_c.as_mut().map(BorrowMut::borrow_mut),
                                     )?;
@@ -691,6 +720,7 @@ impl<'a> CargoUnused<'a, '_> {
         fn filter_actually_used_crates<'a>(
             rustc: &Rustc,
             deps: &'a [NodeDep],
+            root_lib: Option<(&'a str, &'a PackageId)>,
             mut rt: &mut tokio::runtime::current_thread::Runtime,
             mut ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
         ) -> crate::Result<HashSet<&'a PackageId>> {
@@ -796,10 +826,12 @@ impl<'a> CargoUnused<'a, '_> {
                 }
             }
 
-            let deps = deps
+            let mut deps = deps
                 .iter()
                 .map(|d| (&*d.name, &d.pkg))
                 .collect::<HashMap<_, _>>();
+            let root_lib = root_lib.map(|(name, id)| (name.replace('-', "_"), id));
+            deps.extend(root_lib.as_ref().map(|(name, id)| (name.deref(), *id)));
             Ok(rustc
                 .externs()
                 .iter()
@@ -818,87 +850,6 @@ impl<'a> CargoUnused<'a, '_> {
         #[serde(rename_all = "kebab-case")]
         struct CargoTomlPackage {
             default_run: Option<String>,
-        }
-
-        #[derive(Default, serde::Deserialize)]
-        struct Cache {
-            debug: IndexMap<PackageId, IndexSet<PackageId>>,
-            release: IndexMap<PackageId, IndexSet<PackageId>>,
-        }
-
-        impl Cache {
-            fn get_mut(&mut self, debug: bool) -> &mut IndexMap<PackageId, IndexSet<PackageId>> {
-                if debug {
-                    &mut self.debug
-                } else {
-                    &mut self.release
-                }
-            }
-
-            fn entry<'a>(
-                &'a mut self,
-                debug: bool,
-                key: &PackageId,
-            ) -> indexmap::map::Entry<'a, PackageId, IndexSet<PackageId>> {
-                self.get_mut(debug).entry(key.clone())
-            }
-
-            fn sort(&mut self, packages: &HashMap<&PackageId, &Package>) {
-                fn sort(
-                    map: &mut IndexMap<PackageId, IndexSet<PackageId>>,
-                    packages: &HashMap<&PackageId, &Package>,
-                ) {
-                    for values in map.values_mut() {
-                        values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
-                    }
-                    map.sort_by(|x, _, y, _| ordkey(packages[x]).cmp(&ordkey(packages[y])));
-                }
-
-                fn ordkey(package: &Package) -> (&str, &Version, &PackageId) {
-                    (&package.name, &package.version, &package.id)
-                }
-
-                sort(&mut self.debug, packages);
-                sort(&mut self.release, packages);
-            }
-        }
-
-        impl miniserde::Serialize for Cache {
-            fn begin(&self) -> miniserde::ser::Fragment {
-                struct Map<V: miniserde::Serialize> {
-                    debug: V,
-                    release: V,
-                    pos: usize,
-                }
-
-                impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
-                    fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
-                        match self.pos {
-                            0 => {
-                                self.pos += 1;
-                                Some((
-                                    Cow::Borrowed("debug"),
-                                    &self.debug as &dyn miniserde::Serialize,
-                                ))
-                            }
-                            1 => {
-                                self.pos += 1;
-                                Some((
-                                    Cow::Borrowed("release"),
-                                    &self.release as &dyn miniserde::Serialize,
-                                ))
-                            }
-                            _ => None,
-                        }
-                    }
-                }
-
-                miniserde::ser::Fragment::Map(Box::new(Map {
-                    debug: crate::ser::miniser_package_id_package_id_set_map(&self.debug),
-                    release: crate::ser::miniser_package_id_package_id_set_map(&self.release),
-                    pos: 0,
-                }))
-            }
         }
     }
 }

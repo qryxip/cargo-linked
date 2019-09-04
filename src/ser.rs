@@ -1,17 +1,111 @@
 use cargo_metadata::PackageId;
 use indexmap::{IndexMap, IndexSet};
+use miniserde::ser::Fragment;
 
 use std::borrow::Cow;
-use std::ops::Deref as _;
+use std::hash::Hash;
 
-pub(crate) fn miniser_package_id_set<'a>(
-    set: &'a IndexSet<PackageId>,
-) -> impl miniserde::Serialize + 'a {
+impl miniserde::Serialize for crate::Outcome {
+    fn begin(&self) -> Fragment {
+        struct Map<V1, V2> {
+            used: V1,
+            unused: V2,
+            pos: usize,
+        }
+
+        impl<V1: miniserde::Serialize, V2: miniserde::Serialize> miniserde::ser::Map for Map<V1, V2> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                match self.pos {
+                    0 => {
+                        self.pos += 1;
+                        Some((
+                            Cow::Borrowed("used"),
+                            &self.used as &dyn miniserde::Serialize,
+                        ))
+                    }
+                    1 => {
+                        self.pos += 1;
+                        Some((
+                            Cow::Borrowed("unused"),
+                            &self.unused as &dyn miniserde::Serialize,
+                        ))
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        Fragment::Map(Box::new(Map {
+            used: miniser_package_id_set(&self.used),
+            unused: miniser_indexmap(&self.unused),
+            pos: 0,
+        }))
+    }
+}
+
+impl miniserde::Serialize for crate::OutcomeUnused {
+    fn begin(&self) -> Fragment {
+        struct Map<V> {
+            by: V,
+            pos: usize,
+        }
+
+        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                if self.pos == 0 {
+                    self.pos = 1;
+                    Some(("by".into(), &self.by))
+                } else {
+                    None
+                }
+            }
+        }
+
+        Fragment::Map(Box::new(Map {
+            by: miniser_indexmap(&self.by),
+            pos: 0,
+        }))
+    }
+}
+
+impl miniserde::Serialize for crate::CacheByMode {
+    fn begin(&self) -> Fragment {
+        struct Map<V1, V2> {
+            targets: V1,
+            dependencies: V2,
+            pos: usize,
+        }
+
+        impl<V1: miniserde::Serialize, V2: miniserde::Serialize> miniserde::ser::Map for Map<V1, V2> {
+            fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
+                match self.pos {
+                    0 => {
+                        self.pos = 1;
+                        Some(("targets".into(), &self.targets))
+                    }
+                    1 => {
+                        self.pos = 2;
+                        Some(("dependencies".into(), &self.dependencies))
+                    }
+                    _ => None,
+                }
+            }
+        }
+
+        Fragment::Map(Box::new(Map {
+            targets: miniser_to_string_package_id_indexset_map(&self.targets),
+            dependencies: miniser_to_string_package_id_indexset_map(&self.dependencies),
+            pos: 0,
+        }))
+    }
+}
+
+fn miniser_package_id_set<'a>(set: &'a IndexSet<PackageId>) -> impl miniserde::Serialize + 'a {
     struct Serializer<'a>(indexmap::set::Iter<'a, PackageId>);
 
     impl<'a> miniserde::Serialize for Serializer<'a> {
-        fn begin(&self) -> miniserde::ser::Fragment {
-            miniserde::ser::Fragment::Seq(Box::new(Seq(self.0.clone())))
+        fn begin(&self) -> Fragment {
+            Fragment::Seq(Box::new(Seq(self.0.clone())))
         }
     }
 
@@ -28,66 +122,69 @@ pub(crate) fn miniser_package_id_set<'a>(
     Serializer(set.iter())
 }
 
-pub(crate) fn miniser_package_id_package_id_set_map<'a>(
-    map: &'a IndexMap<PackageId, IndexSet<PackageId>>,
+fn miniser_indexmap<'a>(
+    map: &'a IndexMap<impl Eq + Hash + ToString, impl miniserde::Serialize>,
 ) -> impl miniserde::Serialize + 'a {
-    struct Serializer<'a>(&'a IndexMap<PackageId, IndexSet<PackageId>>);
+    struct Serializer<'a, K, V>(&'a IndexMap<K, V>);
 
-    impl<'a> miniserde::Serialize for Serializer<'a> {
-        fn begin(&self) -> miniserde::ser::Fragment {
-            miniserde::ser::Fragment::Map(Box::new(Map {
-                pairs: self
-                    .0
-                    .iter()
-                    .map(|(k, v)| (k.repr.deref(), miniser_package_id_set(v)))
-                    .collect(),
-                pos: 0,
-            }))
+    impl<'a, K: Eq + Hash + ToString, V: miniserde::Serialize> miniserde::Serialize
+        for Serializer<'a, K, V>
+    {
+        fn begin(&self) -> Fragment {
+            Fragment::Map(Box::new(Map(self.0.iter())))
         }
     }
 
-    struct Map<'a, V: miniserde::Serialize + 'a> {
-        pairs: Vec<(&'a str, V)>,
-        pos: usize,
-    }
+    struct Map<'a, K, V>(indexmap::map::Iter<'a, K, V>);
 
-    impl<'a, V: miniserde::Serialize + 'a> miniserde::ser::Map for Map<'a, V> {
+    impl<'a, K: ToString, V: miniserde::Serialize> miniserde::ser::Map for Map<'a, K, V> {
         fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
-            let (key, values) = self.pairs.get(self.pos)?;
-            self.pos += 1;
-            Some(((*key).into(), values))
+            self.0
+                .next()
+                .map(|(k, v)| (k.to_string().into(), v as &dyn miniserde::Serialize))
         }
     }
 
     Serializer(map)
 }
 
-pub(crate) fn miniser_package_id_x_indexmap<'a, V: miniserde::Serialize>(
-    map: &'a IndexMap<PackageId, V>,
+fn miniser_to_string_package_id_indexset_map<
+    'a,
+    K: ToString + 'a,
+    I: IntoIterator<Item = (&'a K, &'a IndexSet<PackageId>)>,
+>(
+    map: I,
 ) -> impl miniserde::Serialize + 'a {
-    struct Serializer<'a, V>(&'a IndexMap<PackageId, V>);
+    struct Serializer<V>(Vec<(String, V)>);
 
-    impl<'a, V: miniserde::Serialize> miniserde::Serialize for Serializer<'a, V> {
-        fn begin(&self) -> miniserde::ser::Fragment {
-            miniserde::ser::Fragment::Map(Box::new(Map {
-                pairs: self.0.iter().map(|(k, v)| (k.repr.deref(), v)).collect(),
+    impl<V: miniserde::Serialize> miniserde::Serialize for Serializer<V> {
+        fn begin(&self) -> Fragment {
+            Fragment::Map(Box::new(Map {
+                slice: &self.0,
                 pos: 0,
             }))
         }
     }
 
-    struct Map<'a, V: miniserde::Serialize + 'a> {
-        pairs: Vec<(&'a str, V)>,
+    struct Map<'a, V> {
+        slice: &'a [(String, V)],
         pos: usize,
     }
 
-    impl<'a, V: miniserde::Serialize + 'a> miniserde::ser::Map for Map<'a, V> {
+    impl<'a, V: miniserde::Serialize> miniserde::ser::Map for Map<'a, V> {
         fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
-            let (key, values) = self.pairs.get(self.pos)?;
-            self.pos += 1;
-            Some(((*key).into(), values))
+            if let Some((key, val)) = self.slice.get(self.pos) {
+                self.pos += 1;
+                Some((key.into(), val as &dyn miniserde::Serialize))
+            } else {
+                None
+            }
         }
     }
 
-    Serializer(map)
+    Serializer(
+        map.into_iter()
+            .map(|(k, v)| (k.to_string(), miniser_package_id_set(v)))
+            .collect(),
+    )
 }

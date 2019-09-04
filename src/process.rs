@@ -1,3 +1,4 @@
+use crate::path::{Utf8Path, Utf8PathBuf};
 use crate::ExecutableTarget;
 
 use cargo_metadata::Metadata;
@@ -94,7 +95,7 @@ pub(crate) struct Rustc {
     arg0: OsString,
     opts: RustcOpts,
     envs: BTreeMap<String, String>,
-    workspace_root: PathBuf,
+    workspace_root: Utf8PathBuf,
 }
 
 impl Rustc {
@@ -102,13 +103,13 @@ impl Rustc {
         arg0: &OsStr,
         opts: RustcOpts,
         envs: BTreeMap<String, String>,
-        workspace_root: &Path,
+        workspace_root: impl AsRef<Utf8Path>,
     ) -> Self {
         Self {
             arg0: arg0.to_owned(),
             opts,
             envs,
-            workspace_root: workspace_root.to_owned(),
+            workspace_root: workspace_root.as_ref().to_owned(),
         }
     }
 
@@ -116,9 +117,9 @@ impl Rustc {
         &self.opts.r#extern
     }
 
-    pub(crate) fn input_abs(&self) -> PathBuf {
-        if Path::new(&self.opts.input).is_absolute() {
-            self.opts.input.clone().into()
+    pub(crate) fn input_abs(&self) -> Utf8PathBuf {
+        if self.opts.input.is_absolute() {
+            self.opts.input.clone()
         } else {
             self.workspace_root.join(&self.opts.input)
         }
@@ -197,7 +198,7 @@ pub(crate) struct RustcOpts {
     color: Option<String>,
     #[structopt(long = "remap-path-prefix")]
     remap_path_prefix: Option<String>,
-    input: String,
+    input: Utf8PathBuf,
 }
 
 impl RustcOpts {
@@ -314,7 +315,7 @@ impl RustcOpts {
             args.push("--remap-path-prefix");
             args.push(remap_path_prefix);
         }
-        args.push(&self.input);
+        args.push(self.input.as_ref());
         args
     }
 }
