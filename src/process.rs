@@ -476,14 +476,14 @@ impl ProcessBuilder {
                     }
                 }
 
-                let _ = futures01::try_ready!(self
+                let num_read = futures01::try_ready!(self
                     .child_stderr
                     .read_buf(&mut self.stderr_buf)
                     .with_context(|_| crate::ErrorKind::Command {
                         arg0: self.arg0.to_owned()
                     }));
 
-                if let Some(lf_pos) =
+                while let Some(lf_pos) =
                     (self.stderr_pos..self.stderr_buf.len()).find(|&i| self.stderr_buf[i] == b'\n')
                 {
                     let line = str::from_utf8(&self.stderr_buf[self.stderr_pos..lf_pos])
@@ -491,6 +491,10 @@ impl ProcessBuilder {
                         .to_owned();
                     let _ = self.lines_tx.unbounded_send(line);
                     self.stderr_pos = lf_pos + 1;
+                }
+
+                if num_read > 0 {
+                    return Ok(futures01::Async::NotReady);
                 }
 
                 let status = futures01::try_ready!(self.child.poll().with_context(|_| {
