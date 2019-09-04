@@ -562,6 +562,7 @@ impl<'a> CargoUnused<'a, '_> {
             root_bin_src_path,
             dep_src_paths: &dep_src_paths,
             root_manifest_dir,
+            target_dir_with_mode: &target_dir_with_mode,
             rustcs: &rustcs,
         }
         .run();
@@ -582,6 +583,7 @@ impl<'a> CargoUnused<'a, '_> {
             root_bin_src_path: &'a Utf8Path,
             dep_src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Utf8Path; 1]>>,
             root_manifest_dir: &'a Path,
+            target_dir_with_mode: &'b Path,
             rustcs: &'b HashMap<Utf8PathBuf, Rustc>,
         }
 
@@ -598,6 +600,7 @@ impl<'a> CargoUnused<'a, '_> {
                     root_bin_src_path,
                     dep_src_paths,
                     root_manifest_dir,
+                    target_dir_with_mode,
                     rustcs,
                 } = self;
 
@@ -638,8 +641,9 @@ impl<'a> CargoUnused<'a, '_> {
                     let bin_deps = bin_deps.iter().cloned().collect::<HashSet<_>>();
                     (bin_deps.clone(), bin_deps)
                 } else {
-                    return Err(crate::Error::from(crate::ErrorKind::UnexpectedSrcPath {
+                    return Err(crate::Error::from(crate::ErrorKind::MissingRustcOptions {
                         src_path: root_bin_src_path.to_owned().into(),
+                        target_dir_with_mode: target_dir_with_mode.to_owned(),
                     }));
                 };
 
@@ -661,8 +665,9 @@ impl<'a> CargoUnused<'a, '_> {
                                 let cache = cache.insert(indexset!());
                                 for &dep_src_path in &dep_src_paths[&cur] {
                                     let rustc = rustcs.get(dep_src_path).ok_or_else(|| {
-                                        crate::ErrorKind::UnexpectedSrcPath {
+                                        crate::ErrorKind::MissingRustcOptions {
                                             src_path: dep_src_path.to_owned().into(),
+                                            target_dir_with_mode: target_dir_with_mode.to_owned(),
                                         }
                                     })?;
                                     let output = filter_actually_used_crates(

@@ -86,6 +86,13 @@ pub enum ErrorKind {
     ParseCargoBuildVvStderr { stderr: String },
     #[display(fmt = "Failed to parse {:?}", args)]
     ParseRustcOptions { args: Vec<String> },
-    #[display(fmt = "Unexpected `src_path`: {}", "src_path.display()")]
-    UnexpectedSrcPath { src_path: PathBuf },
+    #[display(
+        fmt = "Missing rustc options for {:?}. Touch the file or remove {:?}",
+        src_path,
+        target_dir_with_mode
+    )]
+    MissingRustcOptions {
+        src_path: PathBuf,
+        target_dir_with_mode: PathBuf,
+    },
 }
