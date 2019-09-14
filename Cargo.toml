@@ -1,10 +1,10 @@
 [package]
-name = "cargo-unused"
+name = "cargo-linked"
 version = "0.0.0"
 authors = ["Ryo Yamashita <qryxip@gmail.com>"]
 edition = "2018"
 description = "List actually used crates."
-repository = "https://github.com/qryxip/cargo-unused"
+repository = "https://github.com/qryxip/cargo-linked"
 readme = "README.md"
 keywords = ["cargo"]
 categories = ["development-tools::cargo-plugins"]

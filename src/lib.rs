@@ -1,8 +1,8 @@
-//! Find unused crates.
+//! List actually used crates.
 //!
 //! ```no_run
 //! use cargo::CliError;
-//! use cargo_unused::{CompileOptionsForSingleTarget, LinkedPackages};
+//! use cargo_linked::{CompileOptionsForSingleTarget, LinkedPackages};
 //! use structopt::StructOpt;
 //!
 //! use std::path::PathBuf;
@@ -69,16 +69,16 @@
 //! }
 //!
 //! impl Opt {
-//!     fn configure(&self) -> cargo_unused::Result<cargo::Config> {
+//!     fn configure(&self) -> cargo_linked::Result<cargo::Config> {
 //!         let Self::Subcommand {
 //!             manifest_path,
 //!             color,
 //!             ..
 //!         } = self;
-//!         cargo_unused::configure(&manifest_path, &color)
+//!         cargo_linked::configure(&manifest_path, &color)
 //!     }
 //!
-//!     fn run(&self, config: &cargo::Config) -> cargo_unused::Result<String> {
+//!     fn run(&self, config: &cargo::Config) -> cargo_linked::Result<String> {
 //!         let Self::Subcommand {
 //!             debug,
 //!             lib,
@@ -90,7 +90,7 @@
 //!             ..
 //!         } = self;
 //!
-//!         let ws = cargo_unused::workspace(config, manifest_path)?;
+//!         let ws = cargo_linked::workspace(config, manifest_path)?;
 //!         let (compile_options, target) = CompileOptionsForSingleTarget {
 //!             ws: &ws,
 //!             debug: *debug,
@@ -390,7 +390,7 @@ impl LinkedPackages {
 
         let cache_file = ws
             .target_dir()
-            .join("cargo_unused")
+            .join("cargo_linked")
             .open_rw("cache.json", ws.config(), "msg?")
             .with_context(|_| crate::ErrorKind::Cargo)?;
         let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
@@ -645,7 +645,7 @@ pub fn configure(manifest_path: &Option<PathBuf>, color: &str) -> crate::Result<
         .workspace(&config)
         .with_context(|_| crate::ErrorKind::Cargo)?
         .target_dir()
-        .join("cargo_unused")
+        .join("cargo_linked")
         .join("target")
         .into_path_unlocked();
 

@@ -1,4 +1,4 @@
-use cargo_unused::CompileOptionsForSingleTarget;
+use cargo_linked::CompileOptionsForSingleTarget;
 
 use cargo::util::config::Config;
 use failure::Fallible;
@@ -63,8 +63,8 @@ fn main() -> Fallible<()> {
 #[derive(Debug, StructOpt)]
 #[structopt(author, about, bin_name = "cargo")]
 enum Opt {
-    #[structopt(author, about, name = "unused")]
-    Unused {
+    #[structopt(author, about, name = "linked")]
+    Linked {
         #[structopt(long, help = "Run in debug mode", display_order(1))]
         debug: bool,
         #[structopt(long, help = "Target the `lib`", display_order(2))]
@@ -122,17 +122,17 @@ enum Opt {
 }
 
 impl Opt {
-    fn configure(&self) -> cargo_unused::Result<Config> {
-        let Self::Unused {
+    fn configure(&self) -> cargo_linked::Result<Config> {
+        let Self::Linked {
             manifest_path,
             color,
             ..
         } = self;
-        cargo_unused::configure(manifest_path, color)
+        cargo_linked::configure(manifest_path, color)
     }
 
     fn run(&self, config: &Config) -> Fallible<String> {
-        let Self::Unused {
+        let Self::Linked {
             debug,
             lib,
             bin,
@@ -143,7 +143,7 @@ impl Opt {
             ..
         } = self;
 
-        let ws = cargo_unused::workspace(config, manifest_path)?;
+        let ws = cargo_linked::workspace(config, manifest_path)?;
         let (compile_options, target) = CompileOptionsForSingleTarget {
             ws: &ws,
             debug: *debug,
@@ -156,7 +156,7 @@ impl Opt {
         }
         .find()?;
 
-        let outcome = cargo_unused::LinkedPackages::find(&ws, &compile_options, target)?;
+        let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
         Ok(miniserde::json::to_string(&outcome))
     }
 }

@@ -1,6 +1,6 @@
-# cargo-unused
+# cargo-linked
 
-[![Build Status](https://img.shields.io/travis/com/qryxip/cargo-unused/master.svg?label=windows%20%26%20macos%20%26%20linux)](https://travis-ci.com/qryxip/cargo-unused)
+[![Build Status](https://img.shields.io/travis/com/qryxip/cargo-linked/master.svg?label=windows%20%26%20macos%20%26%20linux)](https://travis-ci.com/qryxip/cargo-linked)
 ![Maintenance](https://img.shields.io/maintenance/yes/2019)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue)
 
@@ -8,10 +8,10 @@ A Cargo subcommand to list actually used crates.
 
 ## Installation
 
-`cargo-unused` is not yet uploaded to [crates.io](https://crates.io).
+`cargo-linked` is not yet uploaded to [crates.io](https://crates.io).
 
 ```
-$ cargo install --git https://github.com/qryxip/cargo-unused
+$ cargo install --git https://github.com/qryxip/cargo-linked
 ```
 
 ## Usage
@@ -19,12 +19,12 @@ $ cargo install --git https://github.com/qryxip/cargo-unused
 ### `bin`
 
 ```
-cargo-unused 0.0.0
+cargo-linked 0.0.0
 Ryo Yamashita <qryxip@gmail.com>
 List actually used crates.
 
 USAGE:
-    cargo unused [FLAGS] [OPTIONS]
+    cargo linked [FLAGS] [OPTIONS]
 
 FLAGS:
         --debug      Run in debug mode
@@ -42,7 +42,7 @@ OPTIONS:
 ```
 
 ```
-$ cargo unused --debug 2>&- | jq
+$ cargo linked --debug 2>&- | jq
 {
   "used": [
     "aho-corasick 0.7.6 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -58,7 +58,7 @@ $ cargo unused --debug 2>&- | jq
     "bytesize 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "c2-chacha 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
     "cargo 0.38.0 (registry+https://github.com/rust-lang/crates.io-index)",
-    "cargo-unused 0.0.0 (path+file:///home/ryo/src/cargo-unused)",
+    "cargo-linked 0.0.0 (path+file:///home/ryo/src/cargo-linked)",
     "cc 1.0.45 (registry+https://github.com/rust-lang/crates.io-index)",
     "cfg-if 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)",
     "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -211,7 +211,7 @@ $ cargo unused --debug 2>&- | jq
 
 ```rust
 use cargo::CliError;
-use cargo_unused::{CompileOptionsForSingleTarget, LinkedPackages};
+use cargo_linked::{CompileOptionsForSingleTarget, LinkedPackages};
 use structopt::StructOpt;
 
 use std::path::PathBuf;
@@ -278,16 +278,16 @@ enum Opt {
 }
 
 impl Opt {
-    fn configure(&self) -> cargo_unused::Result<cargo::Config> {
+    fn configure(&self) -> cargo_linked::Result<cargo::Config> {
         let Self::Subcommand {
             manifest_path,
             color,
             ..
         } = self;
-        cargo_unused::configure(&manifest_path, &color)
+        cargo_linked::configure(&manifest_path, &color)
     }
 
-    fn run(&self, config: &cargo::Config) -> cargo_unused::Result<String> {
+    fn run(&self, config: &cargo::Config) -> cargo_linked::Result<String> {
         let Self::Subcommand {
             debug,
             lib,
@@ -299,7 +299,7 @@ impl Opt {
             ..
         } = self;
 
-        let ws = cargo_unused::workspace(config, manifest_path)?;
+        let ws = cargo_linked::workspace(config, manifest_path)?;
         let (compile_options, target) = CompileOptionsForSingleTarget {
             ws: &ws,
             debug: *debug,
