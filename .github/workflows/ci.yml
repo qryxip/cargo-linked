@@ -3,29 +3,58 @@ name: CI
 on:
   push:
     branches:
-    - master
+      - master
   pull_request:
 
 jobs:
   test:
     strategy:
       matrix:
-        os: [windows-2019, macOS-10.14, ubuntu-18.04]
+        rust_host:
+          - x86_64-pc-windows-msvc
+          - x86_64-pc-windows-gnu
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+        include:
+          - rust_host: x86_64-pc-windows-msvc
+            os: windows-2019
+          - rust_host: x86_64-pc-windows-gnu
+            os: windows-2019
+          - rust_host: x86_64-apple-darwin
+            os: macOS-10.14
+          - rust_host: x86_64-unknown-linux-gnu
+            os: ubuntu-18.04
+          - rust_host: x86_64-unknown-linux-musl
+            os: ubuntu-18.04
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v1
     - name: rustup-init (Windows)
       run: |
         curl -sSf --tlsv1.2 --proto =https -o ./rustup-init.exe https://win.rustup.rs/x86_64
-        .\rustup-init.exe -y --no-modify-path --default-toolchain stable
+        .\rustup-init.exe -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
+        %USERPROFILE%\.cargo\bin\rustup update stable
         %USERPROFILE%\.cargo\bin\rustup.exe component add clippy rustfmt
       if: matrix.os == 'windows-2019'
     - name: rustup-init (Unix)
       run: |
         curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
-        bash ./rustup-init -y --no-modify-path --default-toolchain stable
+        bash ./rustup-init -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
+        ~/.cargo/bin/rustup update stable
         ~/.cargo/bin/rustup component add clippy rustfmt
       if: matrix.os != 'windows-2019'
+    - name: Display versions
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        rustc -Vv
+        echo
+        cargo -Vv
+        echo
+        cargo clippy -V
+        echo
+        rustfmt -V
+      shell: bash
     - name: cargo fmt -- --check
       run: |
         PATH="$HOME/.cargo/bin:$PATH"
@@ -35,13 +64,17 @@ jobs:
       run: |
         PATH="$HOME/.cargo/bin:$PATH"
         # A hack to avoid IRC
-        cargo check --all --all-targets &&
+        cargo check --all --all-targets
+        src_paths="$(
+          cargo metadata --format-version 1 |
+            jq -r '.workspace_members[] as $members | .packages[] | select(.id == $members) | .targets[].src_path'
+        )"
+        if type cygpath > /dev/null 2>&1; then
+          echo "$src_paths" | xargs cygpath -u | xargs touch
+        else
+          echo "$src_paths" | xargs touch
+        fi
         cargo clippy --all --all-targets -- -D warnings
-      shell: bash
-    - name: cargo test
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        cargo test --all --all-targets
       shell: bash
     - name: cargo run
       run: |
