@@ -34,6 +34,8 @@ jobs:
     - name: cargo clippy
       run: |
         PATH="$HOME/.cargo/bin:$PATH"
+        # A hack to avoid IRC
+        cargo check --all --all-targets &&
         cargo clippy --all --all-targets -- -D warnings
       shell: bash
     - name: cargo test
