@@ -81,9 +81,10 @@ jobs:
         PATH="$HOME/.cargo/bin:$PATH"
         cargo test --all --all-targets
       shell: bash
-    - name: Run
+    - name: cargo run
       run: |
         PATH="$HOME/.cargo/bin:$PATH"
-        cargo install --debug --path .
-        cargo linked --debug | jq
+        # ?????
+        output="$(cargo run -- linked --debug)"
+        echo "$output" | jq
       shell: bash
