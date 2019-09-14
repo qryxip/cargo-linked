@@ -54,6 +54,10 @@ jobs:
           cargo clippy -V
           echo
           rustfmt -V
+          echo
+          bash --version
+          echo
+          jq -V
         shell: bash
       - name: cargo fmt -- --check
         run: |
@@ -85,5 +89,5 @@ jobs:
         run: |
           PATH="$HOME/.cargo/bin:$PATH"
           # `jq` is v1.5.1 on ubuntu-18.04
-          cargo run -- --linked --debug | jq .
+          cargo run -- linked --debug | jq .
         shell: bash
