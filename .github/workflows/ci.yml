@@ -29,62 +29,61 @@ jobs:
             os: ubuntu-18.04
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v1
-    - name: rustup-init (Windows)
-      run: |
-        curl -sSf --tlsv1.2 --proto =https -o ./rustup-init.exe https://win.rustup.rs/x86_64
-        .\rustup-init.exe -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
-        %USERPROFILE%\.cargo\bin\rustup update stable
-        %USERPROFILE%\.cargo\bin\rustup.exe component add clippy rustfmt
-      if: matrix.os == 'windows-2019'
-    - name: rustup-init (Unix)
-      run: |
-        curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
-        bash ./rustup-init -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
-        ~/.cargo/bin/rustup update stable
-        ~/.cargo/bin/rustup component add clippy rustfmt
-      if: matrix.os != 'windows-2019'
-    - name: Display versions
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        rustc -Vv
-        echo
-        cargo -Vv
-        echo
-        cargo clippy -V
-        echo
-        rustfmt -V
-      shell: bash
-    - name: cargo fmt -- --check
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        cargo fmt --all -- --check
-      shell: bash
-    - name: cargo clippy
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        # A hack to avoid IRC
-        cargo check --all --all-targets
-        src_paths="$(
-          cargo metadata --format-version 1 |
-            jq -r '.workspace_members[] as $members | .packages[] | select(.id == $members) | .targets[].src_path'
-        )"
-        if [ ${{ matrix.os }} = windows-2019 ]; then
-          echo "$src_paths" | xargs cygpath -u | xargs touch
-        else
-          echo "$src_paths" | xargs touch
-        fi
-        cargo clippy --all --all-targets -- -D warnings
-      shell: bash
-    - name: cargo test
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        cargo test --all --all-targets
-      shell: bash
-    - name: cargo run
-      run: |
-        PATH="$HOME/.cargo/bin:$PATH"
-        # ?????
-        output="$(cargo run -- linked --debug)"
-        echo "$output" | jq
-      shell: bash
+      - uses: actions/checkout@v1
+      - name: rustup-init (Windows)
+        run: |
+          curl -sSf --tlsv1.2 --proto =https -o ./rustup-init.exe https://win.rustup.rs/x86_64
+          .\rustup-init.exe -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
+          %USERPROFILE%\.cargo\bin\rustup.exe update stable
+          %USERPROFILE%\.cargo\bin\rustup.exe component add clippy rustfmt
+        if: matrix.os == 'windows-2019'
+      - name: rustup-init (Unix)
+        run: |
+          curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
+          bash ./rustup-init -y --no-modify-path --default-host ${{ matrix.rust_host }} --default-toolchain stable
+          ~/.cargo/bin/rustup update stable
+          ~/.cargo/bin/rustup component add clippy rustfmt
+        if: matrix.os != 'windows-2019'
+      - name: Display versions
+        run: |
+          PATH="$HOME/.cargo/bin:$PATH"
+          rustc -Vv
+          echo
+          cargo -Vv
+          echo
+          cargo clippy -V
+          echo
+          rustfmt -V
+        shell: bash
+      - name: cargo fmt -- --check
+        run: |
+          PATH="$HOME/.cargo/bin:$PATH"
+          cargo fmt --all -- --check
+        shell: bash
+      - name: cargo clippy
+        run: |
+          PATH="$HOME/.cargo/bin:$PATH"
+          # A hack to avoid IRC
+          cargo check --all --all-targets
+          src_paths="$(
+            cargo metadata --format-version 1 |
+              jq -r '.workspace_members[] as $members | .packages[] | select(.id == $members) | .targets[].src_path'
+          )"
+          if [ ${{ matrix.os }} = windows-2019 ]; then
+            echo "$src_paths" | xargs cygpath -u | xargs touch
+          else
+            echo "$src_paths" | xargs touch
+          fi
+          cargo clippy --all --all-targets -- -D warnings
+        shell: bash
+      - name: cargo test
+        run: |
+          PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --all --all-targets
+        shell: bash
+      - name: cargo run
+        run: |
+          PATH="$HOME/.cargo/bin:$PATH"
+          # `jq` is v1.5.1 on ubuntu-18.04
+          cargo run -- --linked --debug | jq .
+        shell: bash
