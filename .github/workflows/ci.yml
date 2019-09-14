@@ -16,33 +16,31 @@ jobs:
     - uses: actions/checkout@v1
     - name: rustup-init (Windows)
       run: |
-        curl -sSf --tlsv1.2 --proto '=https' -o .\rustup-init.exe https://win.rustup.rs/x86_64
-        ./rustup-init.exe -y --no-modify-path --default-toolchain stable
-        set PATH=%PATH%;%USERPROFILE%\.cargo\bin
-        rustup component add clippy rustfmt
-        rustc --version --verbose
-        cargo --version --verbose
-        cargo clippy --version
-        rustfmt --version
+        curl -sSf --tlsv1.2 --proto =https -o ./rustup-init.exe https://win.rustup.rs/x86_64
+        .\rustup-init.exe -y --no-modify-path --default-toolchain stable
       if: matrix.os == 'windows-2019'
     - name: rustup-init (Unix)
       run: |
         curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
         bash ./rustup-init -y --no-modify-path --default-toolchain stable
-        PATH="$HOME/.cargo/bin:$PATH"
-        rustup component add clippy rustfmt
-        rustup component add clippy rustfmt
-        rustc --version --verbose
-        cargo --version --verbose
-        cargo clippy --version
-        rustfmt --version
       if: matrix.os != 'windows-2019'
     - name: cargo fmt -- --check
-      run: cargo fmt --all -- --check
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        cargo fmt --all -- --check
+      shell: bash
     - name: cargo clippy
-      run: cargo clippy --all --all-targets -- -D warnings
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        cargo clippy --all --all-targets -- -D warnings
+      shell: bash
     - name: cargo test
-      run: cargo test --all --all-targets
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        cargo test --all --all-targets
+      shell: bash
     - name: cargo run
-      run: cargo run -- linked --debug | jq > /dev/null
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        cargo run -- linked --debug | jq > /dev/null
       shell: bash
