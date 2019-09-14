@@ -14,18 +14,29 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v1
-    - name: rustup-init
+    - name: rustup-init (Windows)
       run: |
         curl -sSf --tlsv1.2 --proto '=https' -o .\rustup-init.exe https://win.rustup.rs/x86_64
         ./rustup-init.exe -y --no-modify-path --default-toolchain stable
         set PATH=%PATH%;%USERPROFILE%\.cargo\bin
-      if: matrix.os != 'windows-2019'
-    - name: rustup-init
+        rustup component add clippy rustfmt
+        rustc --version --verbose
+        cargo --version --verbose
+        cargo clippy --version
+        rustfmt --version
+      if: matrix.os == 'windows-2019'
+    - name: rustup-init (Unix)
       run: |
         curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
         bash ./rustup-init -y --no-modify-path --default-toolchain stable
         PATH="$HOME/.cargo/bin:$PATH"
-      if: matrix.os == 'windows-2019'
+        rustup component add clippy rustfmt
+        rustup component add clippy rustfmt
+        rustc --version --verbose
+        cargo --version --verbose
+        cargo clippy --version
+        rustfmt --version
+      if: matrix.os != 'windows-2019'
     - name: cargo fmt -- --check
       run: cargo fmt --all -- --check
     - name: cargo clippy

@@ -1,6 +1,6 @@
 # cargo-linked
 
-![CI](https://github.com/actions/qryxip/cargo-linked/CI/badge.svg)
+![CI](https://github.com/qryxip/cargo-linked/workflows/CI/badge.svg)
 ![Maintenance](https://img.shields.io/maintenance/yes/2019)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue)
 
