@@ -69,7 +69,7 @@ jobs:
           cargo metadata --format-version 1 |
             jq -r '.workspace_members[] as $members | .packages[] | select(.id == $members) | .targets[].src_path'
         )"
-        if [ ${{ matrix.os }} = windows-2019 ] then
+        if [ ${{ matrix.os }} = windows-2019 ]; then
           echo "$src_paths" | xargs cygpath -u | xargs touch
         else
           echo "$src_paths" | xargs touch
