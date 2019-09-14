@@ -1,6 +1,6 @@
 # cargo-linked
 
-[![Build Status](https://img.shields.io/travis/com/qryxip/cargo-linked/master.svg?label=windows%20%26%20macos%20%26%20linux)](https://travis-ci.com/qryxip/cargo-linked)
+![CI](https://github.com/actions/qryxip/cargo-linked/CI/badge.svg)
 ![Maintenance](https://img.shields.io/maintenance/yes/2019)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue)
 
