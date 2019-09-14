@@ -76,8 +76,14 @@ jobs:
         fi
         cargo clippy --all --all-targets -- -D warnings
       shell: bash
-    - name: cargo run
+    - name: cargo test
       run: |
         PATH="$HOME/.cargo/bin:$PATH"
-        cargo run -- linked --debug | jq
+        cargo test --all --all-targets
+      shell: bash
+    - name: Run
+      run: |
+        PATH="$HOME/.cargo/bin:$PATH"
+        cargo install --debug --path .
+        cargo linked --debug | jq
       shell: bash
