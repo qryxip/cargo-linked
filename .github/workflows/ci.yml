@@ -18,7 +18,7 @@ jobs:
       run: |
         curl -sSf --tlsv1.2 --proto =https -o ./rustup-init.exe https://win.rustup.rs/x86_64
         .\rustup-init.exe -y --no-modify-path --default-toolchain stable
-        %HOME\.cargo\bin\rustup.exe component add clippy rustfmt
+        %USERPROFILE%\.cargo\bin\rustup.exe component add clippy rustfmt
       if: matrix.os == 'windows-2019'
     - name: rustup-init (Unix)
       run: |
