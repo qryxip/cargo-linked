@@ -1,3 +1,5 @@
+use cargo::core::manifest::Target;
+use cargo::core::package_id::PackageId;
 use derive_more::{Display, From};
 use failure::{Backtrace, Fail};
 
@@ -39,60 +41,31 @@ impl Fail for Error {
 /// Error kind.
 #[derive(Display, Debug, Fail)]
 pub enum ErrorKind {
-    #[display(fmt = "Maybe invalid metadata")]
-    MaybeInvalidMetadata,
-    #[display(fmt = "Root package not found")]
-    RootNotFound,
-    #[display(fmt = "`.resolve` is not present")]
-    ResolveNotPresent,
     #[display(fmt = "Could not determine which binary to run")]
     AmbiguousTarget,
-    #[display(fmt = "No such `{}`: {:?}", kind, name)]
-    NoSuchTarget { kind: &'static str, name: String },
-    #[display(fmt = "$CARGO is not present")]
-    CargoEnvVarNotPresent,
-    #[display(fmt = "Failed to getcwd")]
-    Getcwd,
-    #[display(fmt = "Interrupted")]
-    CtrlC,
-    #[display(fmt = "tokio error")]
-    Tokio,
-    #[display(fmt = "`{}` failed", "arg0.to_string_lossy()")]
-    Command { arg0: OsString },
     #[display(
-        fmt = "`{}` produced non UTF-8 output",
-        "arg0_filename.to_string_lossy()"
+        fmt = "No such `{}`{}",
+        kind,
+        r#"name.as_ref().map(|s| format!(": {}", s)).unwrap_or_default()"#
     )]
-    NonUtf8Output { arg0_filename: OsString },
+    NoSuchTarget {
+        kind: &'static str,
+        name: Option<String>,
+    },
+    #[display(fmt = "Failed to parse {:?}", args)]
+    ParseRustcOptions { args: Vec<OsString> },
+    #[display(fmt = "`{}` / {} not fond in {}", pkg, target, "cache.display()")]
+    NotFoundInCache {
+        pkg: PackageId,
+        target: Target,
+        cache: PathBuf,
+    },
+    #[display(fmt = "Cargo error")]
+    Cargo,
+    #[display(fmt = "{:?} does not match {:?}", text, regex)]
+    Regex { text: String, regex: &'static str },
     #[display(fmt = "Failed to read {}", "path.display()")]
     ReadFile { path: PathBuf },
     #[display(fmt = "Failed to write {}", "path.display()")]
     WriteFile { path: PathBuf },
-    #[display(fmt = "Failed to open {}", "path.display()")]
-    OpenRw { path: PathBuf },
-    #[display(fmt = "Failed to lock {}", "path.display()")]
-    LockFile { path: PathBuf },
-    #[display(fmt = "Failed to copy {} to {}", "from.display()", "to.display()")]
-    CopyDir { from: PathBuf, to: PathBuf },
-    #[display(fmt = "Failed to move {} to {}", "from.display()", "to.display()")]
-    MoveDir { from: PathBuf, to: PathBuf },
-    #[display(fmt = "Failed to remove {}", "dir.display()")]
-    RemoveDir { dir: PathBuf },
-    #[display(fmt = "Failed to deserialize {}", what)]
-    Deserialize { what: String },
-    #[display(fmt = "{:?} does not match {:?}", text, regex)]
-    Regex { text: String, regex: &'static str },
-    #[display(fmt = "Failed to parse\n===STDERR===\n{}============", stderr)]
-    ParseCargoBuildVvStderr { stderr: String },
-    #[display(fmt = "Failed to parse {:?}", args)]
-    ParseRustcOptions { args: Vec<String> },
-    #[display(
-        fmt = "Missing rustc options for {:?}. Touch the file or remove {:?}",
-        src_path,
-        target_dir_with_mode
-    )]
-    MissingRustcOptions {
-        src_path: PathBuf,
-        target_dir_with_mode: PathBuf,
-    },
 }

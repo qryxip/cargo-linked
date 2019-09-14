@@ -1,24 +1,122 @@
 //! Find unused crates.
 //!
 //! ```no_run
-//! use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
+//! use cargo::CliError;
+//! use cargo_unused::{CompileOptionsForSingleTarget, LinkedPackages};
+//! use structopt::StructOpt;
 //!
-//! let ctrl_c = tokio_signal::ctrl_c();
-//! let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
+//! use std::path::PathBuf;
 //!
-//! let metadata = CargoMetadata::new()
-//!     .cargo(Some("cargo"))
-//!     .manifest_path(Some("./Cargo.toml"))
-//!     .cwd(Some("."))
-//!     .ctrl_c(Some(&mut ctrl_c))
-//!     .run()?;
+//! #[derive(StructOpt)]
+//! #[structopt(author, about, bin_name = "cargo")]
+//! enum Opt {
+//!     #[structopt(author, about, name = "subcommand")]
+//!     Subcommand {
+//!         #[structopt(long, help = "Run in debug mode", display_order(1))]
+//!         debug: bool,
+//!         #[structopt(long, help = "Target the `lib`", display_order(2))]
+//!         lib: bool,
+//!         #[structopt(
+//!             long,
+//!             value_name = "NAME",
+//!             conflicts_with_all(&["lib", "example", "test", "bench"]),
+//!             help = "Target `bin`",
+//!             display_order(1)
+//!         )]
+//!         bin: Option<String>,
+//!         #[structopt(
+//!             long,
+//!             value_name = "NAME",
+//!             conflicts_with_all(&["lib", "bin", "example", "bench"]),
+//!             help = "Target `test`",
+//!             display_order(2)
+//!         )]
+//!         test: Option<String>,
+//!         #[structopt(
+//!             long,
+//!             value_name = "NAME",
+//!             conflicts_with_all(&["lib", "bin", "example", "test"]),
+//!             help = "Target `bench`",
+//!             display_order(3)
+//!         )]
+//!         bench: Option<String>,
+//!         #[structopt(
+//!             long,
+//!             value_name = "NAME",
+//!             conflicts_with_all(&["lib", "bin", "test", "bench"]),
+//!             help = "Target `example`",
+//!             display_order(4)
+//!         )]
+//!         example: Option<String>,
+//!         #[structopt(
+//!             long,
+//!             value_name = "PATH",
+//!             parse(from_os_str),
+//!             help = "Path to Cargo.toml",
+//!             display_order(5)
+//!         )]
+//!         manifest_path: Option<PathBuf>,
+//!         #[structopt(
+//!             long,
+//!             value_name("WHEN"),
+//!             default_value("auto"),
+//!             possible_values(&["auto", "always", "never"]),
+//!             help("Coloring"),
+//!             display_order(6)
+//!         )]
+//!         color: String,
+//!     },
+//! }
 //!
-//! let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
-//!     .target(Some(ExecutableTarget::Bin("main".to_owned())))
-//!     .cargo(Some("cargo"))
-//!     .debug(true)
-//!     .ctrl_c(Some(&mut ctrl_c))
-//!     .run()?;
+//! impl Opt {
+//!     fn configure(&self) -> cargo_unused::Result<cargo::Config> {
+//!         let Self::Subcommand {
+//!             manifest_path,
+//!             color,
+//!             ..
+//!         } = self;
+//!         cargo_unused::configure(&manifest_path, &color)
+//!     }
+//!
+//!     fn run(&self, config: &cargo::Config) -> cargo_unused::Result<String> {
+//!         let Self::Subcommand {
+//!             debug,
+//!             lib,
+//!             bin,
+//!             test,
+//!             bench,
+//!             example,
+//!             manifest_path,
+//!             ..
+//!         } = self;
+//!
+//!         let ws = cargo_unused::workspace(config, manifest_path)?;
+//!         let (compile_options, target) = CompileOptionsForSingleTarget {
+//!             ws: &ws,
+//!             debug: *debug,
+//!             lib: *lib,
+//!             bin,
+//!             test,
+//!             bench,
+//!             example,
+//!             manifest_path,
+//!         }
+//!         .find()?;
+//!         let outcome = LinkedPackages::find(&ws, &compile_options, target)?;
+//!         Ok(miniserde::json::to_string(&outcome))
+//!     }
+//! }
+//!
+//! let opt = Opt::from_args();
+//! let config = opt.configure()?;
+//! match opt.run(&config) {
+//!     Ok(output) => {
+//!         println!("{}", output);
+//!     }
+//!     Err(err) => {
+//!         cargo::exit_with_error(CliError::new(err.into(), 1), &mut config.shell());
+//!     }
+//! }
 //! # failure::Fallible::Ok(())
 //! ```
 
@@ -30,831 +128,702 @@ macro_rules! lazy_regex {
 
 mod error;
 mod fs;
-mod parse;
-mod path;
 mod process;
 mod ser;
 
 #[doc(inline)]
 pub use crate::error::{Error, ErrorKind};
 
-pub use cargo_metadata as cargo_metadata_0_8;
-pub use indexmap as indexmap_1;
-pub use log as log_0_4;
+pub use cargo as cargo_0_38;
 pub use miniserde as miniserde_0_1;
 pub use serde as serde_1;
-pub use tokio_signal as tokio_signal_0_2;
 
-use crate::fs::ExclusivelyLockedJsonFile;
-use crate::path::{Utf8Path, Utf8PathBuf};
+use crate::fs::JsonFileLock;
 use crate::process::Rustc;
 
-use cargo_metadata::{Metadata, Node, NodeDep, Package, PackageId};
+use cargo::core::compiler::{CompileMode, Executor, Unit};
+use cargo::core::manifest::{Target, TargetKind};
+use cargo::core::{dependency, Package, PackageId, Workspace};
+use cargo::ops::{CompileOptions, Packages};
+use cargo::util::command_prelude::ArgMatchesExt;
+use cargo::util::process_builder::ProcessBuilder;
+use cargo::{CargoResult, Config};
+use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
-use indexmap::{indexset, IndexMap, IndexSet};
-use log::{info, warn};
-use maplit::{hashmap, hashset};
+use maplit::{btreemap, hashmap, hashset};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use semver::Version;
-use smallvec::SmallVec;
 
-use std::borrow::BorrowMut;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::env;
+use std::borrow::Borrow;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::iter;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// Result.
 pub type Result<T> = std::result::Result<T, crate::Error>;
 
-/// Outcome.
-#[derive(serde::Serialize)]
-pub struct Outcome {
-    pub used: IndexSet<PackageId>,
-    pub unused: IndexMap<PackageId, OutcomeUnused>,
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct OutcomeUnused {
-    pub by: IndexMap<PackageId, OutcomeUnusedBy>,
-}
-
-#[derive(Debug, miniserde::Serialize, serde::Serialize)]
-pub struct OutcomeUnusedBy {
-    pub optional: bool,
-    pub platform: Option<String>,
-}
-
-#[derive(Default, miniserde::Serialize, serde::Deserialize)]
-struct Cache {
-    debug: CacheByMode,
-    release: CacheByMode,
-}
+#[derive(Default, serde::Deserialize)]
+#[serde(transparent)]
+struct Cache(Vec<CacheValue>);
 
 impl Cache {
-    fn get(&self, debug: bool) -> &CacheByMode {
-        if debug {
-            &self.debug
-        } else {
-            &self.release
+    fn get_or_insert_default(
+        &mut self,
+        key: CacheKey,
+    ) -> &mut BTreeMap<PackageId, CacheUsedPackages> {
+        if self.0.iter().all(|v| v.key != key) {
+            self.0.push(CacheValue {
+                key,
+                used_packages: btreemap!(),
+            });
+            self.0.sort_by_key(|v| v.key);
         }
+        &mut self
+            .0
+            .iter_mut()
+            .find(|v| v.key == key)
+            .unwrap()
+            .used_packages
     }
+}
 
-    fn get_mut(&mut self, debug: bool) -> &mut CacheByMode {
-        if debug {
-            &mut self.debug
-        } else {
-            &mut self.release
-        }
-    }
+#[derive(serde::Deserialize)]
+struct CacheValue {
+    key: CacheKey,
+    used_packages: BTreeMap<PackageId, CacheUsedPackages>,
+}
 
-    fn sort(&mut self, packages: &HashMap<&PackageId, &Package>) {
-        fn ordkey(package: &Package) -> (&str, &Version, &PackageId) {
-            (&package.name, &package.version, &package.id)
-        }
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Deserialize, miniserde::Serialize,
+)]
+struct CacheKey {
+    release: bool,
+}
 
-        let sort_targets = |targets: &mut BTreeMap<Utf8PathBuf, IndexSet<PackageId>>| {
-            for values in targets.values_mut() {
-                values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
-            }
-        };
-
-        let sort_dependencies = |dependencies: &mut IndexMap<PackageId, IndexSet<PackageId>>| {
-            for values in dependencies.values_mut() {
-                values.sort_by(|x, y| ordkey(packages[x]).cmp(&ordkey(packages[y])));
-            }
-            dependencies.sort_by(|x, _, y, _| ordkey(packages[x]).cmp(&ordkey(packages[y])));
-        };
-
-        sort_targets(&mut self.debug.targets);
-        sort_targets(&mut self.release.targets);
-        sort_dependencies(&mut self.debug.dependencies);
-        sort_dependencies(&mut self.release.dependencies);
+impl CacheKey {
+    fn new(release: bool) -> Self {
+        Self { release }
     }
 }
 
 #[derive(Default, serde::Deserialize)]
-struct CacheByMode {
-    targets: BTreeMap<Utf8PathBuf, IndexSet<PackageId>>,
-    dependencies: IndexMap<PackageId, IndexSet<PackageId>>,
+struct CacheUsedPackages {
+    lib: BTreeMap<String, BTreeSet<PackageId>>,
+    bin: BTreeMap<String, BTreeSet<PackageId>>,
+    test: BTreeMap<String, BTreeSet<PackageId>>,
+    bench: BTreeMap<String, BTreeSet<PackageId>>,
+    example_lib: BTreeMap<String, BTreeSet<PackageId>>,
+    example_bin: BTreeMap<String, BTreeSet<PackageId>>,
+    custom_build: BTreeMap<String, BTreeSet<PackageId>>,
 }
 
-/// `bin`, `example`, `test`, or `bench`.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub enum ExecutableTarget {
-    Bin(String),
-    Example(String),
-    Test(String),
-    Bench(String),
-}
-
-impl ExecutableTarget {
-    pub fn try_from_options(
-        bin: &Option<String>,
-        example: &Option<String>,
-        test: &Option<String>,
-        bench: &Option<String>,
-    ) -> Option<Self> {
-        if let Some(bin) = bin {
-            Some(Self::Bin(bin.clone()))
-        } else if let Some(example) = example {
-            Some(Self::Example(example.clone()))
-        } else if let Some(test) = test {
-            Some(Self::Test(test.clone()))
-        } else if let Some(bench) = bench {
-            Some(Self::Bench(bench.clone()))
-        } else {
-            None
-        }
-    }
-}
-
-/// Executes `cargo metadata`.
-///
-/// # Example
-///
-/// ```no_run
-/// use cargo_unused::CargoMetadata;
-///
-/// let ctrl_c = tokio_signal::ctrl_c();
-/// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
-///
-/// let metadata = CargoMetadata::new()
-///     .cargo(Some("cargo"))
-///     .manifest_path(Some("./Cargo.toml"))
-///     .cwd(Some("."))
-///     .ctrl_c(Some(&mut ctrl_c))
-///     .run()?;
-/// # failure::Fallible::Ok(())
-/// ```
-pub struct CargoMetadata<'a> {
-    cargo: Option<OsString>,
-    manifest_path: Option<PathBuf>,
-    cwd: Option<PathBuf>,
-    ctrl_c: Option<&'a mut tokio_signal::IoStream<()>>,
-}
-
-impl CargoMetadata<'static> {
-    /// Constructs a new `CargoMetadata`.
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl CargoMetadata<'_> {
-    /// Sets `cargo`.
-    pub fn cargo<S: AsRef<OsStr>>(self, cargo: Option<S>) -> Self {
-        Self {
-            cargo: cargo.map(|s| s.as_ref().to_owned()),
-            ..self
+impl CacheUsedPackages {
+    fn get<'a>(&'a self, target: &Target) -> Option<&'a BTreeSet<PackageId>> {
+        match target.kind() {
+            TargetKind::Lib(_) => self.lib.get(&target.name().to_owned()),
+            TargetKind::Bin => self.bin.get(&target.name().to_owned()),
+            TargetKind::Test => self.test.get(&target.name().to_owned()),
+            TargetKind::Bench => self.bench.get(&target.name().to_owned()),
+            TargetKind::ExampleLib(_) => self.example_lib.get(&target.name().to_owned()),
+            TargetKind::ExampleBin => self.example_bin.get(&target.name().to_owned()),
+            TargetKind::CustomBuild => self.custom_build.get(&target.name().to_owned()),
         }
     }
 
-    /// Sets `manifest_path`.
-    pub fn manifest_path<P: AsRef<Path>>(self, manifest_path: Option<P>) -> Self {
-        Self {
-            manifest_path: manifest_path.map(|p| p.as_ref().to_owned()),
-            ..self
-        }
-    }
-
-    /// Sets `cwd`.
-    pub fn cwd<P: AsRef<Path>>(self, cwd: Option<P>) -> Self {
-        Self {
-            cwd: cwd.map(|p| p.as_ref().to_owned()),
-            ..self
-        }
-    }
-
-    /// Sets `ctrl_c`.
-    pub fn ctrl_c<'a>(
-        self,
-        ctrl_c: Option<&'a mut tokio_signal::IoStream<()>>,
-    ) -> CargoMetadata<'a> {
-        CargoMetadata {
-            cargo: self.cargo,
-            manifest_path: self.manifest_path,
-            cwd: self.cwd,
-            ctrl_c,
-        }
-    }
-
-    /// Executes `cargo metadata`.
-    pub fn run(self) -> crate::Result<Metadata> {
-        let mut rt = tokio::runtime::current_thread::Runtime::new()
-            .unwrap_or_else(|e| unimplemented!("{:?}", e));
-        let cargo = self
-            .cargo
-            .clone()
-            .or_else(|| env::var_os("CARGO").map(Into::into))
-            .ok_or_else(|| crate::ErrorKind::CargoEnvVarNotPresent)?;
-        crate::process::cargo_metadata(&cargo, self.manifest_path, self.cwd, &mut rt, self.ctrl_c)
-    }
-}
-
-impl Default for CargoMetadata<'static> {
-    fn default() -> Self {
-        Self {
-            cargo: None,
-            manifest_path: None,
-            cwd: None,
-            ctrl_c: None,
+    fn insert<'a, I: IntoIterator<Item = P>, P: Borrow<PackageId>>(
+        &'a mut self,
+        target: &Target,
+        packages: I,
+    ) -> Option<BTreeSet<PackageId>> {
+        let key = target.name().to_owned();
+        let val = packages.into_iter().map(|p| *p.borrow()).collect();
+        match target.kind() {
+            TargetKind::Lib(_) => self.lib.insert(key, val),
+            TargetKind::Bin => self.bin.insert(key, val),
+            TargetKind::Test => self.test.insert(key, val),
+            TargetKind::Bench => self.bench.insert(key, val),
+            TargetKind::ExampleLib(_) => self.example_lib.insert(key, val),
+            TargetKind::ExampleBin => self.example_bin.insert(key, val),
+            TargetKind::CustomBuild => self.custom_build.insert(key, val),
         }
     }
 }
 
-/// Finds unused packages.
-///
-/// # Example
-///
-/// ```no_run
-/// use cargo_unused::{CargoMetadata, CargoUnused, ExecutableTarget};
-///
-/// let ctrl_c = tokio_signal::ctrl_c();
-/// let mut ctrl_c = tokio::runtime::current_thread::Runtime::new()?.block_on(ctrl_c)?;
-///
-/// let metadata = CargoMetadata::new()
-///     .cargo(Some("cargo"))
-///     .manifest_path(Some("./Cargo.toml"))
-///     .cwd(Some("."))
-///     .ctrl_c(Some(&mut ctrl_c))
-///     .run()?;
-///
-/// let cargo_unused::Outcome { used, unused } = CargoUnused::new(&metadata)
-///     .target(Some(ExecutableTarget::Bin("main".to_owned())))
-///     .cargo(Some("cargo"))
-///     .debug(true)
-///     .ctrl_c(Some(&mut ctrl_c))
-///     .run()?;
-/// # failure::Fallible::Ok(())
-/// ```
-pub struct CargoUnused<'a, 'b> {
-    metadata: &'a Metadata,
-    target: Option<ExecutableTarget>,
-    cargo: Option<PathBuf>,
-    debug: bool,
-    ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
+#[derive(Debug, Default)]
+pub struct LinkedPackages {
+    used: BTreeSet<PackageId>,
+    unused: LinkedPackagesUnused,
 }
 
-impl<'a> CargoUnused<'a, 'static> {
-    /// Constructs a new `CargoUnused`.
-    pub fn new(metadata: &'a Metadata) -> Self {
-        Self {
-            metadata,
-            target: None,
-            cargo: None,
-            debug: false,
-            ctrl_c: None,
-        }
-    }
-}
+impl LinkedPackages {
+    pub fn find(
+        ws: &Workspace,
+        compile_opts: &CompileOptions,
+        target: &Target,
+    ) -> crate::Result<Self> {
+        let current = ws.current().with_context(|_| crate::ErrorKind::Cargo)?;
 
-impl<'a> CargoUnused<'a, '_> {
-    /// Sets `target`.
-    pub fn target(self, target: Option<ExecutableTarget>) -> Self {
-        Self { target, ..self }
-    }
+        let all_ids = cargo::ops::resolve_ws(ws)
+            .map(|(ps, _)| ps.package_ids().collect::<HashSet<_>>())
+            .with_context(|_| crate::ErrorKind::Cargo)?;
 
-    /// Sets `cargo`.
-    pub fn cargo<P: AsRef<Path>>(self, cargo: Option<P>) -> Self {
-        let cargo = cargo.map(|p| p.as_ref().to_owned());
-        Self { cargo, ..self }
-    }
+        let (packages, resolve) = Packages::All
+            .to_package_id_specs(ws)
+            .and_then(|specs| cargo::ops::resolve_ws_precisely(ws, &[], false, false, &specs))
+            .with_context(|_| crate::ErrorKind::Cargo)?;
 
-    /// Sets `debug`.
-    pub fn debug(self, debug: bool) -> Self {
-        Self { debug, ..self }
-    }
+        let packages = packages
+            .get_many(packages.package_ids())
+            .with_context(|_| crate::ErrorKind::Cargo)?
+            .into_iter()
+            .map(|p| (p.package_id(), p))
+            .collect::<BTreeMap<_, _>>();
 
-    /// Sets `ctrl_c`.
-    pub fn ctrl_c<'b>(
-        self,
-        ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
-    ) -> CargoUnused<'a, 'b> {
-        CargoUnused {
-            metadata: self.metadata,
-            target: self.target,
-            cargo: self.cargo,
-            debug: self.debug,
-            ctrl_c,
-        }
-    }
+        let target = target.clone();
 
-    /// Executes.
-    pub fn run(self) -> crate::Result<Outcome> {
-        let metadata = self.metadata;
-        let target = self.target.as_ref();
-        let debug = self.debug;
-        let cargo = self
-            .cargo
-            .clone()
-            .or_else(|| env::var_os("CARGO").map(Into::into))
-            .ok_or_else(|| crate::ErrorKind::CargoEnvVarNotPresent)?;
-
-        let mut ctrl_c = self.ctrl_c;
-        let mut rt = tokio::runtime::current_thread::Runtime::new()
-            .unwrap_or_else(|e| unimplemented!("{:?}", e));
-
-        let packages = metadata
-            .packages
-            .iter()
-            .map(|p| (&p.id, p))
-            .collect::<HashMap<_, _>>();
-
-        let resolve = metadata
-            .resolve
-            .as_ref()
-            .ok_or(crate::ErrorKind::ResolveNotPresent)?;
-        let root = resolve
-            .root
-            .as_ref()
-            .ok_or(crate::ErrorKind::RootNotFound)?;
-
-        let nodes = resolve
-            .nodes
-            .iter()
-            .map(|n| (&n.id, n))
-            .collect::<HashMap<_, _>>();
-
-        let conds = {
-            let mut conds = hashmap!();
-
-            for package in &metadata.packages {
-                let renamed = package
-                    .dependencies
-                    .iter()
-                    .flat_map(|d| d.rename.as_ref().map(|r| (r, d)))
-                    .collect::<HashMap<_, _>>();
-                let unrenamed = package
-                    .dependencies
-                    .iter()
-                    .filter(|d| d.rename.is_none())
-                    .map(|d| (d.name.as_str(), d))
-                    .collect::<HashMap<_, _>>();
-                let node = &nodes[&package.id];
-
-                for dep in &node.deps {
-                    let dependency = if let Some(dependency) = renamed.get(&dep.name) {
-                        dependency
-                    } else {
-                        static NAME: Lazy<Regex> = lazy_regex!(r"\A([a-zA-Z0-9_-]+).*\z");
-                        let name = &NAME
-                            .captures(&dep.pkg.repr)
-                            .unwrap_or_else(|| unimplemented!())[1];
-                        unrenamed.get(name).unwrap_or_else(|| unimplemented!())
-                    };
-
-                    let value = OutcomeUnusedBy {
-                        optional: dependency.optional,
-                        platform: dependency.target.as_ref().map(ToString::to_string),
-                    };
-
-                    conds
-                        .entry(&dep.pkg)
-                        .or_insert_with(IndexMap::new)
-                        .insert(package.id.clone(), value);
-                }
-            }
-
-            for value in conds.values_mut() {
-                fn ordkey<'a>(package: &'a Package) -> impl Ord + 'a {
-                    (&package.name, &package.version, &package.id)
-                }
-
-                value.sort_by(|id1, _, id2, _| ordkey(&packages[id1]).cmp(&ordkey(&packages[id2])));
-            }
-
-            conds
-        };
-
-        let root_bin_src_path = match target {
-            Some(target) => {
-                let (name, kind) = match target {
-                    ExecutableTarget::Bin(name) => (name, "bin"),
-                    ExecutableTarget::Example(name) => (name, "example"),
-                    ExecutableTarget::Test(name) => (name, "test"),
-                    ExecutableTarget::Bench(name) => (name, "bench"),
-                };
-                &*packages[root]
-                    .targets
-                    .iter()
-                    .find(|t| t.name == *name && t.kind.contains(&kind.to_owned()))
-                    .ok_or_else(|| {
-                        let name = name.clone();
-                        crate::ErrorKind::NoSuchTarget { kind, name }
-                    })?
-                    .src_path
-            }
-            None => {
-                let bins = packages[root]
-                    .targets
-                    .iter()
-                    .filter(|t| t.kind.iter().any(|k| k == "bin"))
-                    .collect::<Vec<_>>();
-                if bins.len() == 1 {
-                    &bins[0].src_path
-                } else {
-                    let default_run =
-                        crate::fs::read_toml::<CargoToml>(&packages[root].manifest_path)?
-                            .package
-                            .default_run
-                            .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
-                    &*packages[root]
-                        .targets
-                        .iter()
-                        .find(|t| t.name == default_run && t.kind.contains(&"bin".to_owned()))
-                        .ok_or_else(|| {
-                            let (kind, name) = ("bin", default_run.clone());
-                            crate::ErrorKind::NoSuchTarget { kind, name }
-                        })?
-                        .src_path
-                }
-            }
-        };
-        let root_bin_src_path =
-            Utf8Path::new(root_bin_src_path.to_str().expect("this is from a JSON"));
-
-        let dep_src_paths = metadata
-            .packages
-            .iter()
-            .map(|package| {
-                let values = package
-                    .targets
-                    .iter()
-                    .filter(|target| {
-                        target
-                            .kind
-                            .iter()
-                            .any(|k| ["lib", "proc-macro", "custom-build"].contains(&k.deref()))
-                    })
-                    .map(|t| Utf8Path::new(t.src_path.to_str().expect("this is from a JSON")))
-                    .collect();
-                (&package.id, values)
-            })
-            .collect::<HashMap<_, SmallVec<[_; 1]>>>();
-
-        let root_manifest_dir = packages[root]
-            .manifest_path
-            .parent()
-            .unwrap_or(&packages[root].manifest_path);
-
-        let target_dir = root_manifest_dir
-            .join("target")
-            .join("cargo_unused")
-            .join("target");
-        let target_dir_with_mode = root_manifest_dir
-            .join("target")
-            .join("cargo_unused")
-            .join("target")
-            .join(if debug { "debug" } else { "release" });
-        let target_dir_with_mode_bk = target_dir_with_mode.with_extension("bk");
-
-        let rustcs = {
-            let stderr = process::cargo_build_vv(
-                &cargo,
-                target,
-                &target_dir,
-                root_manifest_dir,
-                debug,
-                &mut rt,
-                ctrl_c.as_mut().map(BorrowMut::borrow_mut),
-            )?;
-            let rustc = cargo
-                .with_file_name("rustc")
-                .with_extension(cargo.extension().unwrap_or_default());
-            parse::cargo_build_vv_stderr_to_opts_and_envs(&stderr)?
-                .into_iter()
-                .map(|(envs, opts)| {
-                    let workspace_root = metadata
-                        .workspace_root
-                        .to_str()
-                        .expect("this is from a JSON");
-                    let rustc = Rustc::new(rustc.as_ref(), opts, envs, workspace_root);
-                    (rustc.input_abs().to_owned(), rustc)
-                })
-                .collect::<HashMap<_, _>>()
-        };
-
-        crate::fs::move_dir_with_timestamps(&target_dir_with_mode, &target_dir_with_mode_bk)?;
-        crate::fs::copy_dir(
-            &target_dir_with_mode_bk,
-            &target_dir_with_mode,
-            &fs_extra::dir::CopyOptions {
-                overwrite: false,
-                skip_exist: true,
-                buffer_size: 64 * 1024,
-                copy_inside: true,
-                depth: 16,
-            },
-        )?;
-
-        let result = Context {
-            rt,
-            ctrl_c,
-            debug,
-            packages: &packages,
-            root,
-            nodes: &nodes,
-            conds,
-            root_bin_src_path,
-            dep_src_paths: &dep_src_paths,
-            root_manifest_dir,
-            target_dir_with_mode: &target_dir_with_mode,
-            rustcs: &rustcs,
-        }
-        .run();
-
-        crate::fs::remove_dir_all(&target_dir_with_mode)?;
-        crate::fs::move_dir_with_timestamps(&target_dir_with_mode_bk, &target_dir_with_mode)?;
-
-        return result;
-
-        struct Context<'a, 'b> {
-            rt: tokio::runtime::current_thread::Runtime,
-            ctrl_c: Option<&'b mut tokio_signal::IoStream<()>>,
-            debug: bool,
-            packages: &'b HashMap<&'a PackageId, &'a Package>,
-            root: &'a PackageId,
-            nodes: &'b HashMap<&'a PackageId, &'a Node>,
-            conds: HashMap<&'a PackageId, IndexMap<PackageId, OutcomeUnusedBy>>,
-            root_bin_src_path: &'a Utf8Path,
-            dep_src_paths: &'b HashMap<&'a PackageId, SmallVec<[&'a Utf8Path; 1]>>,
-            root_manifest_dir: &'a Path,
-            target_dir_with_mode: &'b Path,
-            rustcs: &'b HashMap<Utf8PathBuf, Rustc>,
-        }
-
-        impl Context<'_, '_> {
-            fn run(self) -> crate::Result<Outcome> {
-                let Context {
-                    mut rt,
-                    mut ctrl_c,
-                    debug,
-                    packages,
-                    root,
-                    nodes,
-                    mut conds,
-                    root_bin_src_path,
-                    dep_src_paths,
-                    root_manifest_dir,
-                    target_dir_with_mode,
-                    rustcs,
-                } = self;
-
-                let cache_path = root_manifest_dir
-                    .join("target")
-                    .join("cargo_unused")
-                    .join("cache.json");
-                let mut cache_file = ExclusivelyLockedJsonFile::<Cache>::open(&cache_path)?;
-                let mut cache = cache_file.read()?;
-
-                let (mut cur, mut used) = if let Some(rustc) = rustcs.get(root_bin_src_path) {
-                    let (mut cur, mut used) = (hashset!(), hashset!());
-                    let cache = cache
-                        .get_mut(debug)
-                        .targets
-                        .entry(root_bin_src_path.to_owned())
-                        .and_modify(IndexSet::clear)
-                        .or_insert_with(IndexSet::new);
-                    let root_lib = packages[root]
-                        .targets
-                        .iter()
-                        .find(|t| t.kind.contains(&"lib".to_owned()))
-                        .map(|t| (&*t.name, root));
-                    let output = filter_actually_used_crates(
-                        rustc,
-                        &nodes[root].deps,
-                        root_lib,
-                        &mut rt,
-                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
-                    )?;
-                    for &output in &output {
-                        cur.insert(output.clone());
-                        used.insert(output.clone());
-                        cache.insert(output.clone());
-                    }
-                    (cur, used)
-                } else if let Some(bin_deps) = cache.get(debug).targets.get(root_bin_src_path) {
-                    let bin_deps = bin_deps.iter().cloned().collect::<HashSet<_>>();
-                    (bin_deps.clone(), bin_deps)
-                } else {
-                    return Err(crate::Error::from(crate::ErrorKind::MissingRustcOptions {
-                        src_path: root_bin_src_path.to_owned().into(),
-                        target_dir_with_mode: target_dir_with_mode.to_owned(),
-                    }));
-                };
-
-                while !cur.is_empty() {
+        let unnecessary_dev_deps =
+            if target.is_test() || target.is_example() || target.is_custom_build() {
+                hashset!()
+            } else {
+                let mut dev_removed = hashset!(&current);
+                let mut cur = dev_removed.clone();
+                loop {
                     let mut next = hashset!();
-                    for cur in cur {
-                        if dep_src_paths[&cur].iter().any(|&p| rustcs.contains_key(p)) {
-                            cache.get_mut(debug).dependencies.remove(&cur);
-                        }
-                        match cache.get_mut(debug).dependencies.entry(cur.clone()) {
-                            indexmap::map::Entry::Occupied(cache) => {
-                                for id in cache.get() {
-                                    if used.insert(id.clone()) {
-                                        next.insert(id.clone());
-                                    }
-                                }
-                            }
-                            indexmap::map::Entry::Vacant(cache) => {
-                                let cache = cache.insert(indexset!());
-                                for &dep_src_path in &dep_src_paths[&cur] {
-                                    let rustc = rustcs.get(dep_src_path).ok_or_else(|| {
-                                        crate::ErrorKind::MissingRustcOptions {
-                                            src_path: dep_src_path.to_owned().into(),
-                                            target_dir_with_mode: target_dir_with_mode.to_owned(),
-                                        }
-                                    })?;
-                                    let output = filter_actually_used_crates(
-                                        rustc,
-                                        &nodes[&cur].deps,
-                                        None,
-                                        &mut rt,
-                                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
-                                    )?;
-                                    for &output in &output {
-                                        if used.insert(output.clone()) {
-                                            next.insert(output.clone());
-                                        }
-                                        cache.insert(output.clone());
-                                    }
+                    for from_pkg in cur {
+                        for (to_id, deps) in resolve.deps(from_pkg.package_id()) {
+                            if deps
+                                .iter()
+                                .any(|d| d.kind() != dependency::Kind::Development)
+                            {
+                                let to_pkg = &packages[&to_id];
+                                if dev_removed.insert(to_pkg) {
+                                    next.insert(to_pkg);
                                 }
                             }
                         }
                     }
                     cur = next;
-                }
-
-                cache.sort(&packages);
-                cache_file.write(&cache)?;
-
-                let mut used = used.into_iter().collect::<Vec<_>>();
-                let mut unused = packages
-                    .keys()
-                    .map(|&id| id.clone())
-                    .filter(|id| !used.contains(&id))
-                    .collect::<Vec<_>>();
-                for list in &mut [&mut used, &mut unused] {
-                    list.sort_by(|a, b| {
-                        let a = (&packages[a].name, &packages[a].version, a);
-                        let b = (&packages[b].name, &packages[b].version, b);
-                        a.cmp(&b)
-                    })
-                }
-
-                Ok(Outcome {
-                    used: used.into_iter().collect(),
-                    unused: unused
-                        .into_iter()
-                        .map(|unused| {
-                            let value = OutcomeUnused {
-                                by: conds.remove(&unused).unwrap_or_default(),
-                            };
-                            (unused, value)
-                        })
-                        .collect(),
-                })
-            }
-        }
-
-        fn filter_actually_used_crates<'a>(
-            rustc: &Rustc,
-            deps: &'a [NodeDep],
-            root_lib: Option<(&'a str, &'a PackageId)>,
-            mut rt: &mut tokio::runtime::current_thread::Runtime,
-            mut ctrl_c: Option<&mut tokio_signal::IoStream<()>>,
-        ) -> crate::Result<HashSet<&'a PackageId>> {
-            #[derive(serde::Deserialize)]
-            struct ErrorMessage {
-                message: String,
-                code: Option<ErrorMessageCode>,
-            }
-
-            #[derive(serde::Deserialize)]
-            struct ErrorMessageCode {
-                code: String,
-            }
-
-            let mut exclusion = FixedBitSet::with_capacity(rustc.externs().len());
-            exclusion.insert_range(0..rustc.externs().len());
-
-            let something_wrong = 'run: loop {
-                static E0432_SINGLE_MOD: Lazy<Regex> =
-                    lazy_regex!(r"\Aunresolved import `([a-zA-Z0-9_]+)`\z");
-                static E0433_SINGLE_MOD: Lazy<Regex> = lazy_regex!(
-                    r"\Afailed to resolve: [a-z ]+`([a-zA-Z0-9_]+)`( in `\{\{root\}\}`)?\z",
-                );
-                static E0463_SINGLE_MOD: Lazy<Regex> =
-                    lazy_regex!(r"\Acan't find crate for `([a-zA-Z0-9_]+)`\z");
-
-                let (success, stderr) = rustc.run(
-                    &exclusion,
-                    &mut rt,
-                    ctrl_c.as_mut().map(BorrowMut::borrow_mut),
-                )?;
-
-                if success {
-                    break false;
-                } else {
-                    let mut updated = false;
-                    let mut num_e0432 = 0;
-                    let mut num_e0433 = 0;
-                    let mut num_e0463 = 0;
-                    let mut num_others = 0;
-
-                    for line in stderr.lines() {
-                        let msg = crate::fs::from_json::<ErrorMessage>(line, "an error message")?;
-
-                        if_chain! {
-                            if let Some(code) = &msg.code;
-                            if let Some(regex) = match &*code.code {
-                                "E0432" => {
-                                    num_e0432 += 1;
-                                    Some(&E0432_SINGLE_MOD)
-                                }
-                                "E0433" => {
-                                    num_e0433 += 1;
-                                    Some(&E0433_SINGLE_MOD)
-                                }
-                                "E0463" => {
-                                    num_e0463 += 1;
-                                    Some(&E0463_SINGLE_MOD)
-                                }
-                                "E0658" => {
-                                    warn!("Found E0658. Trying to exclude crates one by one");
-                                    break 'run true;
-                                }
-                                _ => {
-                                    num_others += 1;
-                                    None
-                                }
-                            };
-                            if let Some(caps) = regex.captures(&msg.message);
-                            if let Some(pos) = rustc
-                                .externs()
-                                .iter()
-                                .position(|e| *e.name() == caps[1]);
-                            then {
-                                updated |= exclusion[pos];
-                                exclusion.set(pos, false);
-                            }
-                        }
-                    }
-
-                    info!(
-                        "E0432: {}, E0433: {}, E0483: {}, other error(s): {}",
-                        num_e0432, num_e0433, num_e0463, num_others,
-                    );
-
-                    if !updated {
-                        warn!("Something is wrong. Trying to exclude crates one by one");
-                        break true;
+                    if cur.is_empty() {
+                        break;
                     }
                 }
+                packages
+                    .values()
+                    .cloned()
+                    .filter(|p| !dev_removed.contains(p))
+                    .map(Package::package_id)
+                    .collect()
             };
 
-            if something_wrong {
-                exclusion.clear();
-                for i in 0..rustc.externs().len() {
-                    exclusion.insert(i);
-                    let (success, _) = rustc.run(
-                        &exclusion,
-                        &mut rt,
-                        ctrl_c.as_mut().map(BorrowMut::borrow_mut),
-                    )?;
-                    exclusion.set(i, success);
+        let extern_crate_names = packages
+            .values()
+            .map(|from_pkg| {
+                let resolve_names = |filter: fn(_) -> _| -> CargoResult<HashMap<_, _>> {
+                    resolve
+                        .deps(from_pkg.package_id())
+                        .flat_map(|(to_id, deps)| deps.iter().map(move |d| (d, to_id)))
+                        .filter(|&(d, _)| filter(d.kind()))
+                        .map(|(_, to_id)| {
+                            let to_lib = packages
+                                .get(&to_id)
+                                .unwrap_or_else(|| panic!("could not find `{}`", to_id))
+                                .targets()
+                                .iter()
+                                .find(|t| t.is_lib())
+                                .unwrap_or_else(|| {
+                                    panic!("`{}` does not have any `lib` target", to_id)
+                                });
+                            let extern_crate_name =
+                                resolve.extern_crate_name(from_pkg.package_id(), to_id, to_lib)?;
+                            Ok((to_id, extern_crate_name))
+                        })
+                        .collect()
+                };
+
+                let normal_dev = resolve_names(|k| k != dependency::Kind::Build)?;
+                let build = resolve_names(|k| k == dependency::Kind::Build)?;
+                let self_lib_name = from_pkg
+                    .targets()
+                    .iter()
+                    .find(|t| t.is_lib())
+                    .map(|lib| {
+                        let id = from_pkg.package_id();
+                        resolve.extern_crate_name(id, id, lib)
+                    })
+                    .transpose()?;
+
+                let extern_crate_names = from_pkg
+                    .targets()
+                    .iter()
+                    .map(|from_target| {
+                        let mut extern_crate_names = if from_target.is_custom_build() {
+                            build.clone()
+                        } else {
+                            normal_dev.clone()
+                        };
+                        if !(from_target.is_lib() || from_target.is_custom_build()) {
+                            if let Some(self_lib_name) = self_lib_name.clone() {
+                                extern_crate_names.insert(from_pkg.package_id(), self_lib_name);
+                            }
+                        }
+                        (from_target.clone(), extern_crate_names)
+                    })
+                    .collect::<HashMap<_, _>>();
+
+                Ok((from_pkg.package_id(), extern_crate_names))
+            })
+            .collect::<CargoResult<HashMap<_, _>>>()
+            .with_context(|_| crate::ErrorKind::Cargo)?;
+
+        let store = Arc::new(Mutex::new(ExecStore::default()));
+        let exec: Arc<dyn Executor + 'static> = Arc::new(Exec {
+            target,
+            extern_crate_names,
+            store: store.clone(),
+        });
+        cargo::ops::compile_with_exec(ws, compile_opts, &exec)
+            .with_context(|_| crate::ErrorKind::Cargo)?;
+
+        let cache_file = ws
+            .target_dir()
+            .join("cargo_unused")
+            .open_rw("cache.json", ws.config(), "msg?")
+            .with_context(|_| crate::ErrorKind::Cargo)?;
+        let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
+        let mut cache = cache_file.read()?;
+
+        let store = store.lock().unwrap();
+        let key = CacheKey::new(compile_opts.build_config.release);
+
+        for (&id, used_packages) in &store.used_packages {
+            for (target, used_packages) in used_packages {
+                cache
+                    .get_or_insert_default(key)
+                    .entry(id)
+                    .or_insert_with(CacheUsedPackages::default)
+                    .insert(target, used_packages);
+            }
+        }
+
+        cache_file.write(&cache)?;
+
+        let mut outcome = Self::default();
+        outcome.used = {
+            let mut used = store
+                .targets
+                .iter()
+                .map(|(&id, targets)| {
+                    let mut used = hashset!();
+                    for target in targets {
+                        used.extend(
+                            cache
+                                .get_or_insert_default(key)
+                                .get(&id)
+                                .and_then(|ps| ps.get(target))
+                                .ok_or_else(|| crate::ErrorKind::NotFoundInCache {
+                                    pkg: id,
+                                    target: target.clone(),
+                                    cache: cache_file.path().to_owned(),
+                                })?
+                                .iter()
+                                .cloned(),
+                        );
+                    }
+                    Ok((id, used))
+                })
+                .collect::<crate::Result<HashMap<_, _>>>()?;
+
+            let mut unused = resolve.iter().collect::<HashSet<_>>();
+            loop {
+                let mut removed = false;
+                for ids in used.values() {
+                    for id in ids {
+                        removed |= unused.remove(id);
+                    }
+                }
+                if !removed {
+                    break;
                 }
             }
 
-            let mut deps = deps
-                .iter()
-                .map(|d| (&*d.name, &d.pkg))
-                .collect::<HashMap<_, _>>();
-            let root_lib = root_lib.map(|(name, id)| (name.replace('-', "_"), id));
-            deps.extend(root_lib.as_ref().map(|(name, id)| (name.deref(), *id)));
-            Ok(rustc
-                .externs()
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| !exclusion[i])
-                .flat_map(|(_, e)| deps.get(&e.name()).cloned())
-                .collect())
+            for unused in &unused {
+                used.remove(unused);
+            }
+
+            used.into_iter()
+                .flat_map(|(from, to)| to.into_iter().chain(iter::once(from)))
+                .collect()
+        };
+
+        outcome.unused.trivial = all_ids
+            .iter()
+            .cloned()
+            .filter(|id| {
+                !outcome.used.contains(id)
+                    && (!store.targets.contains_key(id) || unnecessary_dev_deps.contains(id))
+            })
+            .collect();
+        outcome.unused.maybe_obsolete = all_ids
+            .iter()
+            .cloned()
+            .filter(|id| !(outcome.used.contains(id) || outcome.unused.trivial.contains(id)))
+            .collect();
+
+        Ok(outcome)
+    }
+}
+
+#[derive(Default, Debug, serde::Deserialize)]
+pub struct LinkedPackagesUnused {
+    pub trivial: BTreeSet<PackageId>,
+    pub maybe_obsolete: BTreeSet<PackageId>,
+}
+
+#[derive(Debug)]
+struct Exec {
+    target: Target,
+    extern_crate_names: HashMap<PackageId, HashMap<Target, HashMap<PackageId, String>>>,
+    store: Arc<Mutex<ExecStore>>,
+}
+
+impl Executor for Exec {
+    fn exec(
+        &self,
+        cmd: ProcessBuilder,
+        id: PackageId,
+        target: &Target,
+        _: CompileMode,
+        on_stdout_line: &mut dyn FnMut(&str) -> CargoResult<()>,
+        on_stderr_line: &mut dyn FnMut(&str) -> CargoResult<()>,
+    ) -> CargoResult<()> {
+        static E0432_SINGLE_MOD: Lazy<Regex> =
+            lazy_regex!(r"\Aunresolved import `([a-zA-Z0-9_]+)`\z");
+        static E0433_SINGLE_MOD: Lazy<Regex> =
+            lazy_regex!(r"\Afailed to resolve [a-z ]+`([a-zA-Z0-9_]+)`( in `\{\{root\}\}`)?\z");
+        static E0463_SINGLE_MOD: Lazy<Regex> =
+            lazy_regex!(r"\Acan't find crate for `([a-zA-Z0-9_]+)`\z");
+
+        let mut cmd = Rustc::new(cmd, id, target)?;
+        let mut exclude = FixedBitSet::with_capacity(cmd.externs().len());
+        exclude.insert_range(0..cmd.externs().len());
+
+        let needs_exclude_one_by_one = loop {
+            if let Some(errors) =
+                cmd.capture_error_messages(&exclude, on_stdout_line, on_stderr_line)?
+            {
+                let mut updated = false;
+                let mut num_e0432 = 0;
+                let mut num_e0433 = 0;
+                let mut num_e0463 = 0;
+                let mut num_e0658 = 0;
+                let mut num_others = 0;
+
+                for error in errors {
+                    if_chain! {
+                        if let Some(code) = &error.code;
+                        if let Some(regex) = match &*code.code {
+                            "E0432" => {
+                                num_e0432 += 1;
+                                Some(&E0432_SINGLE_MOD)
+                            }
+                            "E0433" => {
+                                num_e0433 += 1;
+                                Some(&E0433_SINGLE_MOD)
+                            }
+                            "E0463" => {
+                                num_e0463 += 1;
+                                Some(&E0463_SINGLE_MOD)
+                            }
+                            "E0658" => {
+                                num_e0658 += 1;
+                                None
+                            }
+                            _ => {
+                                num_others += 1;
+                                None
+                            }
+                        };
+                        if let Some(caps) = regex.captures(&error.message);
+                        if let Some(pos) = cmd
+                            .externs()
+                            .iter()
+                            .position(|e| *e.name() == caps[1]);
+                        then {
+                            updated |= exclude[pos];
+                            exclude.set(pos, false);
+                        }
+                    }
+                }
+
+                on_stderr_line(&format!(
+                    "E0432: {}, E0433: {}, E0483: {}, E0658: {}, other error(s): {}",
+                    num_e0432, num_e0433, num_e0463, num_e0658, num_others,
+                ))?;
+
+                if !updated || num_e0658 > 0 {
+                    break true;
+                }
+            } else {
+                break false;
+            }
+        };
+
+        if needs_exclude_one_by_one {
+            exclude.clear();
+            let mut success = true;
+            for i in 0..cmd.externs().len() {
+                exclude.insert(i);
+                success = cmd
+                    .capture_error_messages(&exclude, on_stdout_line, on_stderr_line)?
+                    .is_none();
+                exclude.set(i, success);
+            }
+            if !success {
+                exclude.set(cmd.externs().len() - 1, false);
+                cmd.run(&exclude, on_stdout_line, on_stderr_line)?;
+            }
         }
 
-        #[derive(serde::Deserialize)]
-        struct CargoToml {
-            package: CargoTomlPackage,
+        let used = cmd
+            .externs()
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !exclude[i])
+            .map(|(_, e)| e.name())
+            .collect::<HashSet<_>>();
+        let used = self
+            .extern_crate_names
+            .get(&id)
+            .and_then(|extern_crate_names| extern_crate_names.get(target))
+            .expect("`extern_crate_names` should contain all of the targets")
+            .iter()
+            .filter(|(_, name)| used.contains(name.as_str()))
+            .map(|(&id, _)| id)
+            .collect();
+
+        self.store
+            .lock()
+            .unwrap()
+            .used_packages
+            .entry(id)
+            .or_insert_with(HashMap::new)
+            .insert(target.clone(), used);
+        Ok(())
+    }
+
+    fn force_rebuild(&self, unit: &Unit) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .targets
+            .entry((*unit).pkg.package_id())
+            .or_insert_with(BTreeSet::new)
+            .insert((*unit).target.clone());
+        false
+    }
+}
+
+#[derive(Default, Debug)]
+struct ExecStore {
+    used_packages: HashMap<PackageId, HashMap<Target, BTreeSet<PackageId>>>,
+    targets: BTreeMap<PackageId, BTreeSet<Target>>,
+}
+
+pub fn configure(manifest_path: &Option<PathBuf>, color: &str) -> crate::Result<Config> {
+    let mut config = Config::default().with_context(|_| crate::ErrorKind::Cargo)?;
+
+    let mut args = DummyArgMatches(hashmap!());
+    if let Some(manifest_path) = manifest_path {
+        args.insert("manifest-path", vec![OsString::from(manifest_path)]);
+    }
+
+    let target_dir = args
+        .workspace(&config)
+        .with_context(|_| crate::ErrorKind::Cargo)?
+        .target_dir()
+        .join("cargo_unused")
+        .join("target")
+        .into_path_unlocked();
+
+    config
+        .configure(
+            0,
+            None,
+            &Some(color.to_owned()),
+            false,
+            false,
+            false,
+            &Some(target_dir),
+            &[],
+        )
+        .with_context(|_| crate::ErrorKind::Cargo)?;
+    Ok(config)
+}
+
+pub fn workspace<'a>(
+    config: &'a Config,
+    manifest_path: &Option<PathBuf>,
+) -> crate::Result<Workspace<'a>> {
+    let mut args = DummyArgMatches(hashmap!());
+    if let Some(manifest_path) = manifest_path {
+        args.insert("manifest-path", vec![OsString::from(manifest_path)]);
+    }
+
+    args.workspace(config)
+        .with_context(|_| crate::ErrorKind::Cargo)
+        .map_err(Into::into)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CompileOptionsForSingleTarget<'a, 'b> {
+    pub ws: &'a Workspace<'a>,
+    pub debug: bool,
+    pub lib: bool,
+    pub bin: &'b Option<String>,
+    pub test: &'b Option<String>,
+    pub bench: &'b Option<String>,
+    pub example: &'b Option<String>,
+    pub manifest_path: &'b Option<PathBuf>,
+}
+
+impl<'a> CompileOptionsForSingleTarget<'a, '_> {
+    pub fn find(self) -> crate::Result<(CompileOptions<'a>, &'a Target)> {
+        let Self {
+            ws,
+            debug,
+            lib,
+            bin,
+            test,
+            bench,
+            example,
+            manifest_path,
+        } = self;
+
+        let mut args = DummyArgMatches(hashmap!());
+        if let Some(manifest_path) = manifest_path {
+            args.insert("manifest-path", vec![OsString::from(manifest_path)]);
         }
 
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct CargoTomlPackage {
-            default_run: Option<String>,
+        let current = ws.current().with_context(|_| crate::ErrorKind::Cargo)?;
+
+        let find_by_name = |name: &str, kind: &'static str| -> _ {
+            current
+                .targets()
+                .iter()
+                .find(|t| t.name() == name && t.kind().description() == kind)
+                .ok_or_else(|| {
+                    crate::Error::from(crate::ErrorKind::NoSuchTarget {
+                        kind,
+                        name: Some(name.to_owned()),
+                    })
+                })
+        };
+
+        if !debug {
+            args.insert("release", vec![]);
         }
+
+        let (arg_key, arg_val, target) = if lib {
+            let target = current
+                .targets()
+                .iter()
+                .find(|t| t.is_lib())
+                .ok_or_else(|| crate::ErrorKind::NoSuchTarget {
+                    kind: "lib",
+                    name: None,
+                })?;
+            ("lib", vec![], target)
+        } else if let Some(bin) = bin {
+            let target = find_by_name(bin, "bin")?;
+            ("bin", vec![OsString::from(bin)], target)
+        } else if let Some(test) = test {
+            let target = find_by_name(test, "integration-test")?;
+            ("test", vec![OsString::from(test)], target)
+        } else if let Some(bench) = bench {
+            let target = find_by_name(bench, "bench")?;
+            ("bench", vec![OsString::from(bench)], target)
+        } else if let Some(example) = example {
+            let target = find_by_name(example, "example")?;
+            ("example", vec![OsString::from(example)], target)
+        } else {
+            let bins = current
+                .targets()
+                .iter()
+                .filter(|t| *t.kind() == TargetKind::Bin)
+                .collect::<Vec<_>>();
+            let target = if bins.len() == 1 {
+                &bins[0]
+            } else {
+                let name = current
+                    .manifest()
+                    .default_run()
+                    .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
+                find_by_name(name, "bin")?
+            };
+            ("bin", vec![OsString::from(target.name())], target)
+        };
+
+        args.insert(arg_key, arg_val);
+        let compile_options = args
+            .compile_options(ws.config(), CompileMode::Build, Some(ws))
+            .with_context(|_| crate::ErrorKind::Cargo)?;
+        Ok((compile_options, target))
+    }
+}
+
+struct DummyArgMatches(HashMap<&'static str, Vec<OsString>>);
+
+impl DummyArgMatches {
+    fn insert(&mut self, key: &'static str, val: Vec<OsString>) -> Option<Vec<OsString>> {
+        self.0.insert(key, val)
+    }
+}
+
+impl ArgMatchesExt for DummyArgMatches {
+    fn _value_of(&self, name: &str) -> Option<&str> {
+        let value = self
+            .0
+            .get(name)?
+            .get(0)?
+            .to_str()
+            .expect("unexpected invalid UTF-8 code point");
+        Some(value)
+    }
+
+    fn _value_of_os(&self, name: &str) -> Option<&OsStr> {
+        self.0.get(name)?.get(0).map(Deref::deref)
+    }
+
+    fn _values_of(&self, name: &str) -> Vec<String> {
+        self.0
+            .get(name)
+            .map(Deref::deref)
+            .unwrap_or_default()
+            .iter()
+            .map(|value| {
+                value
+                    .to_str()
+                    .expect("unexpected invalid UTF-8 code point")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn _values_of_os(&self, name: &str) -> Vec<OsString> {
+        self.0
+            .get(name)
+            .map(Deref::deref)
+            .unwrap_or_default()
+            .iter()
+            .map(Clone::clone)
+            .collect()
+    }
+
+    fn _is_present(&self, name: &str) -> bool {
+        self.0.contains_key(name)
     }
 }
