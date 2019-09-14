@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches:
+    - master
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-2019, macOS-10.14, ubuntu-18.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v1
+    - name: rustup-init
+      run: |
+        curl -sSf --tlsv1.2 --proto '=https' -o .\rustup-init.exe https://win.rustup.rs/x86_64
+        ./rustup-init.exe -y --no-modify-path --default-toolchain stable
+        set PATH=%PATH%;%USERPROFILE%\.cargo\bin
+      if: matrix.os != 'windows-2019'
+    - name: rustup-init
+      run: |
+        curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
+        bash ./rustup-init -y --no-modify-path --default-toolchain stable
+        PATH="$HOME/.cargo/bin:$PATH"
+      if: matrix.os == 'windows-2019'
+    - name: cargo fmt -- --check
+      run: cargo fmt --all -- --check
+    - name: cargo clippy
+      run: cargo clippy --all --all-targets -- -D warnings
+    - name: cargo test
+      run: cargo test --all --all-targets
+    - name: cargo run
+      run: cargo run -- linked --debug | jq > /dev/null
+      shell: bash
