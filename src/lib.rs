@@ -519,7 +519,6 @@ impl Executor for Exec {
                 let mut num_e0432 = 0;
                 let mut num_e0433 = 0;
                 let mut num_e0463 = 0;
-                let mut num_e0658 = 0;
                 let mut num_others = 0;
 
                 for error in errors {
@@ -537,10 +536,6 @@ impl Executor for Exec {
                             "E0463" => {
                                 num_e0463 += 1;
                                 Some(&E0463_SINGLE_MOD)
-                            }
-                            "E0658" => {
-                                num_e0658 += 1;
-                                None
                             }
                             _ => {
                                 num_others += 1;
@@ -560,11 +555,11 @@ impl Executor for Exec {
                 }
 
                 on_stderr_line(&format!(
-                    "E0432: {}, E0433: {}, E0483: {}, E0658: {}, other error(s): {}",
-                    num_e0432, num_e0433, num_e0463, num_e0658, num_others,
+                    "E0432: {}, E0433: {}, E0483: {}, other error(s): {}",
+                    num_e0432, num_e0433, num_e0463, num_others,
                 ))?;
 
-                if !updated || num_e0658 > 0 {
+                if !updated {
                     break true;
                 }
             } else {
@@ -573,14 +568,17 @@ impl Executor for Exec {
         };
 
         if needs_exclude_one_by_one {
-            exclude.clear();
+            let prev = exclude;
+            exclude = FixedBitSet::with_capacity(cmd.externs().len());
             let mut success = true;
             for i in 0..cmd.externs().len() {
-                exclude.insert(i);
-                success = cmd
-                    .capture_error_messages(&exclude, on_stdout_line, on_stderr_line)?
-                    .is_none();
-                exclude.set(i, success);
+                if prev[i] {
+                    exclude.insert(i);
+                    success = cmd
+                        .capture_error_messages(&exclude, on_stdout_line, on_stderr_line)?
+                        .is_none();
+                    exclude.set(i, success);
+                }
             }
             if !success {
                 exclude.set(cmd.externs().len() - 1, false);
