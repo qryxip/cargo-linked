@@ -3,6 +3,7 @@
 ![CI](https://github.com/qryxip/cargo-linked/workflows/CI/badge.svg)
 ![Maintenance](https://img.shields.io/maintenance/yes/2019)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue)
+[![dependency status](https://deps.rs/repo/github/qryxip/cargo-linked/status.svg)](https://deps.rs/repo/github/qryxip/cargo-linked)
 
 A Cargo subcommand to list actually used crates.
 
