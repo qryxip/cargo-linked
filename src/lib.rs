@@ -128,6 +128,7 @@ macro_rules! lazy_regex {
 
 mod error;
 mod fs;
+mod parse;
 mod process;
 mod ser;
 
@@ -141,6 +142,7 @@ pub use serde as serde_1;
 use crate::fs::JsonFileLock;
 use crate::process::Rustc;
 
+use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, Workspace};
@@ -158,6 +160,7 @@ use regex::Regex;
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::iter;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -383,6 +386,7 @@ impl LinkedPackages {
         let exec: Arc<dyn Executor + 'static> = Arc::new(Exec {
             target,
             extern_crate_names,
+            supports_color: ws.config().shell().supports_color(),
             store: store.clone(),
         });
         cargo::ops::compile_with_exec(ws, compile_opts, &exec)
@@ -487,6 +491,7 @@ pub struct LinkedPackagesUnused {
 struct Exec {
     target: Target,
     extern_crate_names: HashMap<PackageId, HashMap<Target, HashMap<PackageId, String>>>,
+    supports_color: bool,
     store: Arc<Mutex<ExecStore>>,
 }
 
@@ -509,7 +514,44 @@ impl Executor for Exec {
 
         let mut cmd = Rustc::new(cmd, id, target)?;
         let mut exclude = FixedBitSet::with_capacity(cmd.externs().len());
-        exclude.insert_range(0..cmd.externs().len());
+        let uses = crate::parse::find_uses_lossy(
+            target.src_path(),
+            &cmd.externs().iter().map(|e| e.name()).collect(),
+        );
+        let uses = match uses {
+            Ok(uses) => uses,
+            Err(err) => {
+                let mut msg = "".to_owned();
+                for (i, cause) in err.as_fail().iter_chain().enumerate() {
+                    let head = if i == 0 && err.as_fail().cause().is_none() {
+                        "warning:"
+                    } else if i == 0 {
+                        "  warning:"
+                    } else {
+                        "caused by:"
+                    };
+                    if self.supports_color {
+                        writeln!(msg, "{} ", Colour::Yellow.bold().paint(head)).unwrap();
+                    } else {
+                        writeln!(msg, "{} ", head).unwrap();
+                    }
+                    for (i, line) in cause.to_string().lines().enumerate() {
+                        if i > 0 {
+                            (0..=head.len()).for_each(|_| msg.push(' '));
+                        }
+                        msg += line;
+                        msg.push('\n');
+                    }
+                }
+                on_stderr_line(msg.trim_end())?;
+                hashset!()
+            }
+        };
+        for (i, r#extern) in cmd.externs().iter().enumerate() {
+            if !uses.contains(r#extern.name()) {
+                exclude.insert(i);
+            }
+        }
 
         let needs_exclude_one_by_one = loop {
             if let Some(errors) =
