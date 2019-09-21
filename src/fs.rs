@@ -1,10 +1,19 @@
 use cargo::util::FileLock;
+use failure::Fallible;
 use failure::ResultExt as _;
 use serde::de::DeserializeOwned;
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::marker::PhantomData;
 use std::path::Path;
+
+pub(crate) fn read_src(path: &Path) -> Fallible<syn::File> {
+    let src = std::fs::read_to_string(path)
+        .with_context(|_| failure::err_msg(format!("Failed to read {}", path.display())))?;
+    syn::parse_file(&src)
+        .with_context(|_| failure::err_msg(format!("Failed to parse {}", path.display())))
+        .map_err(Into::into)
+}
 
 pub(crate) struct JsonFileLock<T: Default + miniserde::Serialize + DeserializeOwned> {
     lock: FileLock,
