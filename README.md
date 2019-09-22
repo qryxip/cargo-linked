@@ -48,6 +48,7 @@ $ cargo linked --debug 2>&- | jq
   "used": [
     "aho-corasick 0.7.6 (registry+https://github.com/rust-lang/crates.io-index)",
     "ansi_term 0.11.0 (registry+https://github.com/rust-lang/crates.io-index)",
+    "ansi_term 0.12.1 (registry+https://github.com/rust-lang/crates.io-index)",
     "atty 0.2.13 (registry+https://github.com/rust-lang/crates.io-index)",
     "autocfg 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
     "backtrace 0.3.37 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -68,7 +69,7 @@ $ cargo linked --debug 2>&- | jq
     "crossbeam-channel 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
     "crossbeam-utils 0.6.6 (registry+https://github.com/rust-lang/crates.io-index)",
     "crypto-hash 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
-    "curl 0.4.23 (registry+https://github.com/rust-lang/crates.io-index)",
+    "curl 0.4.24 (registry+https://github.com/rust-lang/crates.io-index)",
     "curl-sys 0.4.21 (registry+https://github.com/rust-lang/crates.io-index)",
     "derive_more 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "failure 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -88,7 +89,6 @@ $ cargo linked --debug 2>&- | jq
     "hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
     "home 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
     "http 0.1.18 (registry+https://github.com/rust-lang/crates.io-index)",
-    "humantime 1.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "idna 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
     "idna 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "if_chain 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -110,7 +110,7 @@ $ cargo linked --debug 2>&- | jq
     "mini-internal 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
     "miniserde 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
     "num_cpus 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
-    "once_cell 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+    "once_cell 1.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "opener 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "openssl 0.10.24 (registry+https://github.com/rust-lang/crates.io-index)",
     "openssl-probe 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -121,11 +121,10 @@ $ cargo linked --debug 2>&- | jq
     "ppv-lite86 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
     "proc-macro-error 0.2.6 (registry+https://github.com/rust-lang/crates.io-index)",
     "proc-macro2 0.4.30 (registry+https://github.com/rust-lang/crates.io-index)",
-    "proc-macro2 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
-    "quick-error 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+    "proc-macro2 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
     "quote 0.6.13 (registry+https://github.com/rust-lang/crates.io-index)",
     "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
-    "rand 0.7.1 (registry+https://github.com/rust-lang/crates.io-index)",
+    "rand 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
     "rand_chacha 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
     "rand_core 0.5.1 (registry+https://github.com/rust-lang/crates.io-index)",
     "regex 1.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -148,8 +147,8 @@ $ cargo linked --debug 2>&- | jq
     "socket2 0.3.11 (registry+https://github.com/rust-lang/crates.io-index)",
     "strip-ansi-escapes 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
     "strsim 0.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
-    "structopt 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
-    "structopt-derive 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+    "structopt 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
+    "structopt-derive 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
     "syn 0.15.44 (registry+https://github.com/rust-lang/crates.io-index)",
     "syn 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
     "synstructure 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -176,7 +175,7 @@ $ cargo linked --debug 2>&- | jq
   ],
   "unused": {
     "trivial": [
-      "adler32 1.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
+      "adler32 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
       "commoncrypto 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
       "commoncrypto-sys 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
       "core-foundation 0.6.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -200,8 +199,10 @@ $ cargo linked --debug 2>&- | jq
     "maybe_obsolete": [
       "env_logger 0.6.2 (registry+https://github.com/rust-lang/crates.io-index)",
       "git2-curl 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+      "humantime 1.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
       "libnghttp2-sys 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
       "miniz-sys 0.1.12 (registry+https://github.com/rust-lang/crates.io-index)",
+      "quick-error 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
       "rustc-workspace-hack 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)"
     ]
   }

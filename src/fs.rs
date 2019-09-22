@@ -21,10 +21,6 @@ pub(crate) struct JsonFileLock<T: Default + miniserde::Serialize + DeserializeOw
 }
 
 impl<T: Default + miniserde::Serialize + DeserializeOwned> JsonFileLock<T> {
-    pub(crate) fn path(&self) -> &Path {
-        self.lock.path()
-    }
-
     pub(crate) fn read(&mut self) -> crate::Result<T> {
         let mut value = "".to_owned();
         self.lock

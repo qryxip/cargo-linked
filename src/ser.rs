@@ -50,18 +50,18 @@ impl miniserde::Serialize for crate::CacheValue {
 
 impl miniserde::Serialize for crate::CacheUsedPackages {
     fn begin(&self) -> Fragment {
-        struct Map<V> {
-            lib: V,
-            bin: V,
-            test: V,
-            bench: V,
-            example_lib: V,
-            example_bin: V,
-            custom_build: V,
+        struct Map<V1, V2> {
+            lib: V1,
+            bin: V2,
+            test: V2,
+            bench: V2,
+            example_lib: V2,
+            example_bin: V2,
+            custom_build: V1,
             pos: usize,
         }
 
-        impl<V: miniserde::Serialize> miniserde::ser::Map for Map<V> {
+        impl<V1: miniserde::Serialize, V2: miniserde::Serialize> miniserde::ser::Map for Map<V1, V2> {
             fn next(&mut self) -> Option<(Cow<str>, &dyn miniserde::Serialize)> {
                 match self.pos {
                     0 => {
@@ -98,13 +98,13 @@ impl miniserde::Serialize for crate::CacheUsedPackages {
         }
 
         Fragment::Map(Box::new(Map {
-            lib: miniser_to_string_package_ids_map(&self.lib),
+            lib: miniser_package_ids_option(self.lib.as_ref()),
             bin: miniser_to_string_package_ids_map(&self.bin),
             test: miniser_to_string_package_ids_map(&self.test),
             bench: miniser_to_string_package_ids_map(&self.bench),
             example_lib: miniser_to_string_package_ids_map(&self.example_lib),
             example_bin: miniser_to_string_package_ids_map(&self.example_bin),
-            custom_build: miniser_to_string_package_ids_map(&self.custom_build),
+            custom_build: miniser_package_ids_option(self.custom_build.as_ref()),
             pos: 0,
         }))
     }
@@ -198,6 +198,16 @@ fn miniser_package_ids<P: Borrow<PackageId>, I: IntoIterator<Item = P>>(
             .map(|id| unwrap_to_string_with_serde(id.borrow()))
             .collect(),
     )
+}
+
+fn miniser_package_ids_option<I: IntoIterator<Item = P>, P: Borrow<PackageId> + Debug>(
+    package_ids: Option<I>,
+) -> impl miniserde::Serialize {
+    package_ids.map(|ids| {
+        ids.into_iter()
+            .map(|id| unwrap_to_string_with_serde(id.borrow()))
+            .collect::<Vec<_>>()
+    })
 }
 
 fn miniser_to_string_package_ids_map<
