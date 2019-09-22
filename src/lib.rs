@@ -153,7 +153,7 @@ use cargo::{CargoResult, Config};
 use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
-use maplit::{btreemap, hashmap, hashset};
+use maplit::{btreemap, btreeset, hashmap, hashset};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -161,8 +161,7 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::iter;
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -174,23 +173,31 @@ pub type Result<T> = std::result::Result<T, crate::Error>;
 struct Cache(Vec<CacheValue>);
 
 impl Cache {
-    fn get_or_insert_default(
-        &mut self,
-        key: CacheKey,
-    ) -> &mut BTreeMap<PackageId, CacheUsedPackages> {
-        if self.0.iter().all(|v| v.key != key) {
-            self.0.push(CacheValue {
-                key,
-                used_packages: btreemap!(),
-            });
-            self.0.sort_by_key(|v| v.key);
-        }
-        &mut self
-            .0
-            .iter_mut()
-            .find(|v| v.key == key)
-            .unwrap()
-            .used_packages
+    fn take_or_default(&mut self, key: CacheKey) -> BTreeMap<PackageId, CacheUsedPackages> {
+        (0..self.0.len())
+            .find(|&i| self.0[i].key == key)
+            .map(|i| self.0.remove(i).used_packages)
+            .unwrap_or_default()
+    }
+
+    fn insert(&mut self, key: CacheKey, value: BTreeMap<PackageId, CacheUsedPackages>) {
+        self.0.push(CacheValue {
+            key,
+            used_packages: value,
+        });
+        self.0.sort_by_key(|v| v.key);
+    }
+}
+
+impl Index<CacheKey> for Cache {
+    type Output = BTreeMap<PackageId, CacheUsedPackages>;
+
+    fn index(&self, index: CacheKey) -> &BTreeMap<PackageId, CacheUsedPackages> {
+        self.0
+            .iter()
+            .find(|v| v.key == index)
+            .map(|CacheValue { used_packages, .. }| used_packages)
+            .unwrap_or_else(|| panic!("no value found for {:?}", index))
     }
 }
 
@@ -213,27 +220,27 @@ impl CacheKey {
     }
 }
 
-#[derive(Default, serde::Deserialize)]
+#[derive(Default, Debug, serde::Deserialize)]
 struct CacheUsedPackages {
-    lib: BTreeMap<String, BTreeSet<PackageId>>,
+    lib: Option<BTreeSet<PackageId>>,
     bin: BTreeMap<String, BTreeSet<PackageId>>,
     test: BTreeMap<String, BTreeSet<PackageId>>,
     bench: BTreeMap<String, BTreeSet<PackageId>>,
     example_lib: BTreeMap<String, BTreeSet<PackageId>>,
     example_bin: BTreeMap<String, BTreeSet<PackageId>>,
-    custom_build: BTreeMap<String, BTreeSet<PackageId>>,
+    custom_build: Option<BTreeSet<PackageId>>,
 }
 
 impl CacheUsedPackages {
     fn get<'a>(&'a self, target: &Target) -> Option<&'a BTreeSet<PackageId>> {
         match target.kind() {
-            TargetKind::Lib(_) => self.lib.get(&target.name().to_owned()),
+            TargetKind::Lib(_) => self.lib.as_ref(),
             TargetKind::Bin => self.bin.get(&target.name().to_owned()),
             TargetKind::Test => self.test.get(&target.name().to_owned()),
             TargetKind::Bench => self.bench.get(&target.name().to_owned()),
             TargetKind::ExampleLib(_) => self.example_lib.get(&target.name().to_owned()),
             TargetKind::ExampleBin => self.example_bin.get(&target.name().to_owned()),
-            TargetKind::CustomBuild => self.custom_build.get(&target.name().to_owned()),
+            TargetKind::CustomBuild => self.custom_build.as_ref(),
         }
     }
 
@@ -241,17 +248,27 @@ impl CacheUsedPackages {
         &'a mut self,
         target: &Target,
         packages: I,
-    ) -> Option<BTreeSet<PackageId>> {
+    ) {
         let key = target.name().to_owned();
         let val = packages.into_iter().map(|p| *p.borrow()).collect();
         match target.kind() {
-            TargetKind::Lib(_) => self.lib.insert(key, val),
-            TargetKind::Bin => self.bin.insert(key, val),
-            TargetKind::Test => self.test.insert(key, val),
-            TargetKind::Bench => self.bench.insert(key, val),
-            TargetKind::ExampleLib(_) => self.example_lib.insert(key, val),
-            TargetKind::ExampleBin => self.example_bin.insert(key, val),
-            TargetKind::CustomBuild => self.custom_build.insert(key, val),
+            TargetKind::Lib(_) => self.lib = Some(val),
+            TargetKind::Bin => {
+                self.bin.insert(key, val);
+            }
+            TargetKind::Test => {
+                self.test.insert(key, val);
+            }
+            TargetKind::Bench => {
+                self.bench.insert(key, val);
+            }
+            TargetKind::ExampleLib(_) => {
+                self.example_lib.insert(key, val);
+            }
+            TargetKind::ExampleBin => {
+                self.example_bin.insert(key, val);
+            }
+            TargetKind::CustomBuild => self.custom_build = Some(val),
         }
     }
 }
@@ -382,85 +399,71 @@ impl LinkedPackages {
             .collect::<CargoResult<HashMap<_, _>>>()
             .with_context(|_| crate::ErrorKind::Cargo)?;
 
-        let store = Arc::new(Mutex::new(ExecStore::default()));
+        let cache_file = ws
+            .target_dir()
+            .join("..")
+            .open_rw("cache.json", ws.config(), "msg?")
+            .with_context(|_| crate::ErrorKind::Cargo)?;
+        let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
+        let mut cache = cache_file.read()?;
+        let cache_key = CacheKey::new(compile_opts.build_config.release);
+
+        let store = Arc::new(Mutex::new(ExecStore::new(cache.take_or_default(cache_key))));
         let exec: Arc<dyn Executor + 'static> = Arc::new(Exec {
-            target,
+            target: target.clone(),
             extern_crate_names,
             supports_color: ws.config().shell().supports_color(),
             store: store.clone(),
         });
         cargo::ops::compile_with_exec(ws, compile_opts, &exec)
             .with_context(|_| crate::ErrorKind::Cargo)?;
+        drop(exec);
 
-        let cache_file = ws
-            .target_dir()
-            .join("cargo_linked")
-            .open_rw("cache.json", ws.config(), "msg?")
-            .with_context(|_| crate::ErrorKind::Cargo)?;
-        let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
-        let mut cache = cache_file.read()?;
+        let ExecStore {
+            used_packages,
+            all_targets,
+        } = Arc::try_unwrap(store)
+            .unwrap_or_else(|s| panic!("{:?} has other references", s))
+            .into_inner()
+            .unwrap();
 
-        let store = store.lock().unwrap();
-        let key = CacheKey::new(compile_opts.build_config.release);
-
-        for (&id, used_packages) in &store.used_packages {
-            for (target, used_packages) in used_packages {
-                cache
-                    .get_or_insert_default(key)
-                    .entry(id)
-                    .or_insert_with(CacheUsedPackages::default)
-                    .insert(target, used_packages);
-            }
-        }
-
+        cache.insert(cache_key, used_packages);
         cache_file.write(&cache)?;
 
         let mut outcome = Self::default();
         outcome.used = {
-            let mut used = store
-                .targets
-                .iter()
-                .map(|(&id, targets)| {
-                    let mut used = hashset!();
-                    for target in targets {
-                        used.extend(
-                            cache
-                                .get_or_insert_default(key)
-                                .get(&id)
-                                .and_then(|ps| ps.get(target))
-                                .ok_or_else(|| crate::ErrorKind::NotFoundInCache {
-                                    pkg: id,
-                                    target: target.clone(),
-                                    cache: cache_file.path().to_owned(),
-                                })?
-                                .iter()
-                                .cloned(),
-                        );
-                    }
-                    Ok((id, used))
-                })
-                .collect::<crate::Result<HashMap<_, _>>>()?;
-
-            let mut unused = resolve.iter().collect::<HashSet<_>>();
-            loop {
-                let mut removed = false;
-                for ids in used.values() {
-                    for id in ids {
-                        removed |= unused.remove(id);
+            let mut used = cache[cache_key]
+                .get(&current.package_id())
+                .unwrap()
+                .bin
+                .get(&target.name().to_owned())
+                .unwrap()
+                .clone();
+            let mut cur = used.clone();
+            while !cur.is_empty() {
+                let mut next = btreeset!();
+                for cur in cur {
+                    for dep in cache[cache_key][&cur]
+                        .lib
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .chain(
+                            cache[cache_key][&cur]
+                                .custom_build
+                                .clone()
+                                .unwrap_or_default(),
+                        )
+                    {
+                        if used.insert(dep) {
+                            next.insert(dep);
+                        }
                     }
                 }
-                if !removed {
-                    break;
-                }
+                cur = next;
             }
-
-            for unused in &unused {
-                used.remove(unused);
-            }
-
-            used.into_iter()
-                .flat_map(|(from, to)| to.into_iter().chain(iter::once(from)))
-                .collect()
+            used
         };
 
         outcome.unused.trivial = all_ids
@@ -468,7 +471,7 @@ impl LinkedPackages {
             .cloned()
             .filter(|id| {
                 !outcome.used.contains(id)
-                    && (!store.targets.contains_key(id) || unnecessary_dev_deps.contains(id))
+                    && (!all_targets.contains_key(id) || unnecessary_dev_deps.contains(id))
             })
             .collect();
         outcome.unused.maybe_obsolete = all_ids
@@ -531,9 +534,9 @@ impl Executor for Exec {
                         "caused by:"
                     };
                     if self.supports_color {
-                        writeln!(msg, "{} ", Colour::Yellow.bold().paint(head)).unwrap();
+                        write!(msg, "{} ", Colour::Yellow.bold().paint(head)).unwrap();
                     } else {
-                        writeln!(msg, "{} ", head).unwrap();
+                        write!(msg, "{} ", head).unwrap();
                     }
                     for (i, line) in cause.to_string().lines().enumerate() {
                         if i > 0 {
@@ -642,35 +645,45 @@ impl Executor for Exec {
             .expect("`extern_crate_names` should contain all of the targets")
             .iter()
             .filter(|(_, name)| used.contains(name.as_str()))
-            .map(|(&id, _)| id)
-            .collect();
+            .map(|(&id, _)| id);
 
         self.store
             .lock()
             .unwrap()
             .used_packages
             .entry(id)
-            .or_insert_with(HashMap::new)
-            .insert(target.clone(), used);
+            .or_insert_with(CacheUsedPackages::default)
+            .insert(target, used);
         Ok(())
     }
 
     fn force_rebuild(&self, unit: &Unit) -> bool {
-        self.store
-            .lock()
-            .unwrap()
-            .targets
+        let mut store = self.store.lock().unwrap();
+        store
+            .all_targets
             .entry((*unit).pkg.package_id())
             .or_insert_with(BTreeSet::new)
             .insert((*unit).target.clone());
-        false
+        store
+            .used_packages
+            .get(&(*unit).pkg.package_id())
+            .map_or(true, |v| v.get(&(*unit).target).is_none())
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct ExecStore {
-    used_packages: HashMap<PackageId, HashMap<Target, BTreeSet<PackageId>>>,
-    targets: BTreeMap<PackageId, BTreeSet<Target>>,
+    used_packages: BTreeMap<PackageId, CacheUsedPackages>,
+    all_targets: BTreeMap<PackageId, BTreeSet<Target>>,
+}
+
+impl ExecStore {
+    fn new(used_packages: BTreeMap<PackageId, CacheUsedPackages>) -> Self {
+        Self {
+            used_packages,
+            all_targets: btreemap!(),
+        }
+    }
 }
 
 pub fn configure(manifest_path: &Option<PathBuf>, color: &str) -> crate::Result<Config> {

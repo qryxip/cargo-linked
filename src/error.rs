@@ -1,5 +1,3 @@
-use cargo::core::manifest::Target;
-use cargo::core::package_id::PackageId;
 use derive_more::{Display, From};
 use failure::{Backtrace, Fail};
 
@@ -54,12 +52,6 @@ pub enum ErrorKind {
     },
     #[display(fmt = "Failed to parse {:?}", args)]
     ParseRustcOptions { args: Vec<OsString> },
-    #[display(fmt = "`{}` / {} not fond in {}", pkg, target, "cache.display()")]
-    NotFoundInCache {
-        pkg: PackageId,
-        target: Target,
-        cache: PathBuf,
-    },
     #[display(fmt = "Cargo error")]
     Cargo,
     #[display(fmt = "{:?} does not match {:?}", text, regex)]
