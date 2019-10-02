@@ -135,7 +135,7 @@ mod ser;
 #[doc(inline)]
 pub use crate::error::{Error, ErrorKind};
 
-pub use cargo as cargo_0_38;
+pub use cargo as cargo_0_39;
 pub use miniserde as miniserde_0_1;
 pub use serde as serde_1;
 
