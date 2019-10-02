@@ -1,11 +1,13 @@
 name: CI
 
 on:
+  schedule:
+    - cron: '0 0 * * 0'
   push:
     branches:
       - master
     tags:
-      - 'v.*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
   pull_request:
 
 jobs:
@@ -15,31 +17,23 @@ jobs:
       matrix:
         rust_channel:
           - stable
-        rust_target_triple:
-          - x86_64-pc-windows-msvc
-          - x86_64-pc-windows-gnu
-          - x86_64-apple-darwin
-          - x86_64-unknown-linux-gnu
+        os:
+          - windows-2019
+          - macOS-10.14
+          - ubuntu-18.04
         include:
+          # https://internals.rust-lang.org/t/demote-windows-mingw-targets-to-lower-tiers-or-re-enable-their-tests/10536
           - rust_channel: stable
-            rust_target_triple: x86_64-pc-windows-msvc
-            rust_host_triple: x86_64-pc-windows-msvc
             os: windows-2019
+            rust_triple: x86_64-pc-windows-msvc
           - rust_channel: stable
-            rust_target_triple: x86_64-pc-windows-gnu
-            rust_host_triple: x86_64-unknown-linux-gnu
-            os: ubuntu-18.04
-            skip_run: true
-          - rust_channel: stable
-            rust_target_triple: x86_64-apple-darwin
-            rust_host_triple: x86_64-apple-darwin
             os: macOS-10.14
+            rust_triple: x86_64-apple-darwin
           - rust_channel: stable
-            rust_target_triple: x86_64-unknown-linux-gnu
-            rust_host_triple: x86_64-unknown-linux-gnu
             os: ubuntu-18.04
+            rust_triple: x86_64-unknown-linux-gnu
 
-    name: ${{ matrix.rust_channel }}-${{ matrix.rust_target_triple }}
+    name: ${{ matrix.rust_channel }}-${{ matrix.rust_triple }}
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -47,36 +41,12 @@ jobs:
 
       - name: rustup-init
         run: |
-          curl -sSf --tlsv1.2 --proto '=https' -o ./rustup-init https://sh.rustup.rs
-          bash ./rustup-init -y --no-modify-path --default-toolchain none
+          curl -sSf --tlsv1.2 --proto '=https' -o /tmp/rustup-init https://sh.rustup.rs
+          bash /tmp/rustup-init -y --no-modify-path
+          ~/.cargo/bin/rustup update
+          ~/.cargo/bin/rustup component add clippy rustfmt
           echo 'export PATH="$HOME/.cargo/bin:$HOME/go/bin:$PATH"' > /tmp/rc.bash
-          echo 'export CARGO_CMD=cargo' >> /tmp/rc.bash
-          source /tmp/rc.bash
-          rustup default ${{ matrix.rust_channel }}-${{ matrix.rust_host_triple }}
-          rustup update ${{ matrix.rust_channel }}-${{ matrix.rust_host_triple }}
-          rustup component add clippy
-          if ${{ matrix.rust_target_triple == matrix.rust_host_triple }}; then
-            rustup component add rustfmt
-          fi
         shell: bash
-
-      - name: install cross
-        run: |
-          source /tmp/rc.bash
-          CROSS_VERSION=0.1.16
-          if ${{ matrix.rust_host_triple == 'x86_64-unknown-linux-gnu' }}; then
-            curl -sSfL "https://github.com/rust-embedded/cross/releases/download/v$CROSS_VERSION/cross-v$CROSS_VERSION-x86_64-unknown-linux-musl.tar.gz" | tar xz
-            mv ./cross ~/.cargo/bin/
-          else
-            false
-          fi
-          if [ -f ./ci/Dockerfile.${{ matrix.rust_target_triple }} ]; then
-            docker build -t ci/${{ matrix.rust_target_triple }} -f ci/Dockerfile.${{ matrix.rust_target_triple }} .
-          fi
-          echo 'export CARGO_CMD=cross' >> /tmp/rc.bash
-          echo "export TARGET_TRIPLE='--target ${{ matrix.rust_target_triple }}'" >> /tmp/rc.bash
-        shell: bash
-        if: matrix.rust_target_triple != matrix.rust_host_triple
 
       - name: Display versions
         run: |
@@ -89,12 +59,8 @@ jobs:
           echo -e '\n'
           cargo clippy -V
           echo -e '\n'
-          if ${{ matrix.rust_target_triple == matrix.rust_host_triple }}; then
-            rustfmt -V
-            echo -e '\n'
-          else
-            cross --version
-          fi
+          rustfmt -V
+          echo -e '\n'
           bash --version
         shell: bash
 
@@ -103,13 +69,12 @@ jobs:
           source /tmp/rc.bash
           cargo fmt --all -- --check
         shell: bash
-        if: matrix.rust_target_triple == matrix.rust_host_triple
 
       - name: cargo clippy
         run: |
           source /tmp/rc.bash
           # A hack to avoid IRC
-          "$CARGO_CMD" check --all --all-targets --all-features $TARGET_TRIPLE
+          cargo check --all --all-targets --all-features
           if ${{ matrix.os == 'windows-2019' }}; then
             TO_UNIX_PATHS='xargs cygpath -u'
           else
@@ -119,47 +84,42 @@ jobs:
             jq -r '.workspace_members[] as $members | .packages[] | select(.id == $members) | .targets[].src_path' |
             $TO_UNIX_PATHS |
             xargs touch
-          "$CARGO_CMD" clippy --all --all-targets --all-features $TARGET_TRIPLE -- -D warnings
+          cargo clippy --all --all-targets --all-features -- -D warnings
         shell: bash
 
       - name: cargo build
         run: |
           source /tmp/rc.bash
-          "$CARGO_CMD" build --all --bins --examples --all-features $TARGET_TRIPLE
-          "$CARGO_CMD" build --all --all-targets --all-features $TARGET_TRIPLE
+          cargo build --all --bins --examples --all-features
+          cargo build --all --all-targets --all-features
         shell: bash
 
       - name: cargo test
         run: |
           source /tmp/rc.bash
-          "$CARGO_CMD" test --all --all-targets --all-features $TARGET_TRIPLE
+          cargo test --all --all-targets --all-features
         shell: bash
 
       - name: Run
         run: |
           source /tmp/rc.bash
-          cargo run --all-features --target ${{ matrix.rust_target_triple }} -- linked --debug | jq .
+          cargo run --all-features -- linked --debug | jq .
         shell: bash
-        if: matrix.rust_target_triple == matrix.rust_host_triple
 
       - name: Upload to GitHub Releases
         run: |
           source /tmp/rc.bash
-          if ${{ contains(matrix.rust_target_triple, 'pc-windows') }}; then
+          if ${{ contains(matrix.rust_triple, 'pc-windows') }}; then
             EXE=.exe
           fi
-          if ${{ matrix.rust_target_triple == matrix.rust_host_triple }}; then
-            RELEASE_TARGET="./target/release/${GITHUB_REPOSITORY#*/}$EXE"
-          else
-            RELEASE_TARGET="./target/${{ matrix.rust_target_triple }}/release/${GITHUB_REPOSITORY#*/}$EXE"
-          fi
-          ASSET_STEM="${GITHUB_REPOSITORY#*/}-${GITHUB_REF#refs/tags/}-${{ matrix.rust_host_triple }}"
+          RELEASE_TARGET="./target/release/${GITHUB_REPOSITORY#*/}$EXE"
+          ASSET_STEM="${GITHUB_REPOSITORY#*/}-${GITHUB_REF#refs/tags/}-${{ matrix.rust_triple }}"
           go get github.com/tcnksm/ghr
-          "$CARGO_CMD" build --release --all-features $TARGET_TRIPLE
+          cargo build --release --all-features
           git archive -o "./$ASSET_STEM.tar" --prefix "$ASSET_STEM/" HEAD
           tar -xf "./$ASSET_STEM.tar"
           mv "$RELEASE_TARGET" "./$ASSET_STEM/"
-          if ${{ matrix.os == 'windows-2019' }}; then
+          if ${{ contains(matrix.rust_triple, 'pc-windows') }}; then
             ASSET="./$ASSET_STEM.zip"
             7z a "$ASSET" "./$ASSET_STEM"
             zipinfo "$ASSET"
@@ -172,3 +132,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         if: startsWith(github.ref, 'refs/tags/')
+
+  publish:
+    name: cargo pubish
+    runs-on: ubuntu-18.04
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v1
+
+      - name: cargo publish
+        run: |
+          curl -sSf --tlsv1.2 --proto '=https' -o /tmp/rustup-init https://sh.rustup.rs
+          bash /tmp/rustup-init -y --no-modify-path
+          ~/.cargo/bin/rustup update
+          ~/.cargo/bin/cargo publish --all-features --verbose --token "$CRATES_IO_TOKEN"
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
