@@ -60,6 +60,13 @@ struct OptLinked {
     #[structopt(
         long,
         value_name("NAME"),
+        conflicts_with_all(&["lib", "bin", "test", "bench"]),
+        help("Target the `example`")
+    )]
+    example: Option<String>,
+    #[structopt(
+        long,
+        value_name("NAME"),
         conflicts_with_all(&["lib", "bin", "example", "bench"]),
         help("Target the `test`")
     )]
@@ -71,13 +78,6 @@ struct OptLinked {
         help("Target the `bench`")
     )]
     bench: Option<String>,
-    #[structopt(
-        long,
-        value_name("NAME"),
-        conflicts_with_all(&["lib", "bin", "test", "bench"]),
-        help("Target the `example`")
-    )]
-    example: Option<String>,
     #[structopt(
         long,
         value_name("FEATURES"),
@@ -92,7 +92,7 @@ struct OptLinked {
 }
 
 impl OptLinked {
-    fn run(&self, config: &mut cargo::Config) -> Fallible<()> {
+    fn run(self, config: &mut cargo::Config) -> Fallible<()> {
         let Self {
             lib,
             debug,
@@ -103,38 +103,38 @@ impl OptLinked {
             offline,
             jobs,
             bin,
+            example,
             test,
             bench,
-            example,
             features,
             manifest_path,
             color,
         } = self;
 
         cargo_linked::util::Configure {
-            manifest_path,
-            color,
-            frozen: *frozen,
-            locked: *locked,
-            offline: *offline,
+            manifest_path: &manifest_path,
+            color: &color,
+            frozen,
+            locked,
+            offline,
             modify_target_dir: |d| d.join("cargo_linked").join("target"),
         }
         .configure(config)?;
 
-        let ws = cargo_linked::util::workspace(config, manifest_path)?;
+        let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
         let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
             ws: &ws,
-            jobs,
-            lib: *lib,
-            bin,
-            test,
-            bench,
-            example,
-            debug: *debug,
-            features,
-            all_features: *all_features,
-            no_default_features: *no_default_features,
-            manifest_path,
+            jobs: &jobs,
+            lib,
+            bin: &bin,
+            example: &example,
+            test: &test,
+            bench: &bench,
+            debug,
+            features: &features,
+            all_features,
+            no_default_features,
+            manifest_path: &manifest_path,
         }
         .compile_options_for_single_target()?;
 
