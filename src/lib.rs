@@ -126,6 +126,8 @@ macro_rules! lazy_regex {
     };
 }
 
+pub mod util;
+
 mod error;
 mod fs;
 mod parse;
@@ -147,22 +149,19 @@ use cargo::core::compiler::{CompileMode, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, Workspace};
 use cargo::ops::{CompileOptions, Packages};
-use cargo::util::command_prelude::ArgMatchesExt;
 use cargo::util::process_builder::ProcessBuilder;
-use cargo::{CargoResult, Config};
+use cargo::CargoResult;
 use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
-use maplit::{btreemap, btreeset, hashmap, hashset};
+use maplit::{btreemap, btreeset, hashset};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::ops::{Deref, Index};
-use std::path::PathBuf;
+use std::ops::Index;
 use std::sync::{Arc, Mutex};
 
 /// Result.
@@ -683,200 +682,5 @@ impl ExecStore {
             used_packages,
             all_targets: btreemap!(),
         }
-    }
-}
-
-pub fn configure(manifest_path: &Option<PathBuf>, color: &str) -> crate::Result<Config> {
-    let mut config = Config::default().with_context(|_| crate::ErrorKind::Cargo)?;
-
-    let mut args = DummyArgMatches(hashmap!());
-    if let Some(manifest_path) = manifest_path {
-        args.insert("manifest-path", vec![OsString::from(manifest_path)]);
-    }
-
-    let target_dir = args
-        .workspace(&config)
-        .with_context(|_| crate::ErrorKind::Cargo)?
-        .target_dir()
-        .join("cargo_linked")
-        .join("target")
-        .into_path_unlocked();
-
-    config
-        .configure(
-            0,
-            None,
-            &Some(color.to_owned()),
-            false,
-            false,
-            false,
-            &Some(target_dir),
-            &[],
-        )
-        .with_context(|_| crate::ErrorKind::Cargo)?;
-    Ok(config)
-}
-
-pub fn workspace<'a>(
-    config: &'a Config,
-    manifest_path: &Option<PathBuf>,
-) -> crate::Result<Workspace<'a>> {
-    let mut args = DummyArgMatches(hashmap!());
-    if let Some(manifest_path) = manifest_path {
-        args.insert("manifest-path", vec![OsString::from(manifest_path)]);
-    }
-
-    args.workspace(config)
-        .with_context(|_| crate::ErrorKind::Cargo)
-        .map_err(Into::into)
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CompileOptionsForSingleTarget<'a, 'b> {
-    pub ws: &'a Workspace<'a>,
-    pub debug: bool,
-    pub lib: bool,
-    pub bin: &'b Option<String>,
-    pub test: &'b Option<String>,
-    pub bench: &'b Option<String>,
-    pub example: &'b Option<String>,
-    pub manifest_path: &'b Option<PathBuf>,
-}
-
-impl<'a> CompileOptionsForSingleTarget<'a, '_> {
-    pub fn find(self) -> crate::Result<(CompileOptions<'a>, &'a Target)> {
-        let Self {
-            ws,
-            debug,
-            lib,
-            bin,
-            test,
-            bench,
-            example,
-            manifest_path,
-        } = self;
-
-        let mut args = DummyArgMatches(hashmap!());
-        if let Some(manifest_path) = manifest_path {
-            args.insert("manifest-path", vec![OsString::from(manifest_path)]);
-        }
-
-        let current = ws.current().with_context(|_| crate::ErrorKind::Cargo)?;
-
-        let find_by_name = |name: &str, kind: &'static str| -> _ {
-            current
-                .targets()
-                .iter()
-                .find(|t| t.name() == name && t.kind().description() == kind)
-                .ok_or_else(|| {
-                    crate::Error::from(crate::ErrorKind::NoSuchTarget {
-                        kind,
-                        name: Some(name.to_owned()),
-                    })
-                })
-        };
-
-        if !debug {
-            args.insert("release", vec![]);
-        }
-
-        let (arg_key, arg_val, target) = if lib {
-            let target = current
-                .targets()
-                .iter()
-                .find(|t| t.is_lib())
-                .ok_or_else(|| crate::ErrorKind::NoSuchTarget {
-                    kind: "lib",
-                    name: None,
-                })?;
-            ("lib", vec![], target)
-        } else if let Some(bin) = bin {
-            let target = find_by_name(bin, "bin")?;
-            ("bin", vec![OsString::from(bin)], target)
-        } else if let Some(test) = test {
-            let target = find_by_name(test, "integration-test")?;
-            ("test", vec![OsString::from(test)], target)
-        } else if let Some(bench) = bench {
-            let target = find_by_name(bench, "bench")?;
-            ("bench", vec![OsString::from(bench)], target)
-        } else if let Some(example) = example {
-            let target = find_by_name(example, "example")?;
-            ("example", vec![OsString::from(example)], target)
-        } else {
-            let bins = current
-                .targets()
-                .iter()
-                .filter(|t| *t.kind() == TargetKind::Bin)
-                .collect::<Vec<_>>();
-            let target = if bins.len() == 1 {
-                &bins[0]
-            } else {
-                let name = current
-                    .manifest()
-                    .default_run()
-                    .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
-                find_by_name(name, "bin")?
-            };
-            ("bin", vec![OsString::from(target.name())], target)
-        };
-
-        args.insert(arg_key, arg_val);
-        let compile_options = args
-            .compile_options(ws.config(), CompileMode::Build, Some(ws))
-            .with_context(|_| crate::ErrorKind::Cargo)?;
-        Ok((compile_options, target))
-    }
-}
-
-struct DummyArgMatches(HashMap<&'static str, Vec<OsString>>);
-
-impl DummyArgMatches {
-    fn insert(&mut self, key: &'static str, val: Vec<OsString>) -> Option<Vec<OsString>> {
-        self.0.insert(key, val)
-    }
-}
-
-impl ArgMatchesExt for DummyArgMatches {
-    fn _value_of(&self, name: &str) -> Option<&str> {
-        let value = self
-            .0
-            .get(name)?
-            .get(0)?
-            .to_str()
-            .expect("unexpected invalid UTF-8 code point");
-        Some(value)
-    }
-
-    fn _value_of_os(&self, name: &str) -> Option<&OsStr> {
-        self.0.get(name)?.get(0).map(Deref::deref)
-    }
-
-    fn _values_of(&self, name: &str) -> Vec<String> {
-        self.0
-            .get(name)
-            .map(Deref::deref)
-            .unwrap_or_default()
-            .iter()
-            .map(|value| {
-                value
-                    .to_str()
-                    .expect("unexpected invalid UTF-8 code point")
-                    .to_owned()
-            })
-            .collect()
-    }
-
-    fn _values_of_os(&self, name: &str) -> Vec<OsString> {
-        self.0
-            .get(name)
-            .map(Deref::deref)
-            .unwrap_or_default()
-            .iter()
-            .map(Clone::clone)
-            .collect()
-    }
-
-    fn _is_present(&self, name: &str) -> bool {
-        self.0.contains_key(name)
     }
 }

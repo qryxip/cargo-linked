@@ -1,4 +1,4 @@
-use cargo_linked::CompileOptionsForSingleTarget;
+use cargo_linked::util::CompileOptionsForSingleTargetArgs;
 
 use cargo::util::config::Config;
 use failure::Fallible;
@@ -122,13 +122,17 @@ enum Opt {
 }
 
 impl Opt {
-    fn configure(&self) -> cargo_linked::Result<Config> {
+    fn configure(&self) -> Fallible<Config> {
         let Self::Linked {
             manifest_path,
             color,
             ..
         } = self;
-        cargo_linked::configure(manifest_path, color)
+        let mut config = cargo::Config::default()?;
+        cargo_linked::util::configure(&mut config, manifest_path, color, |target_dir| {
+            target_dir.join("cargo_linked").join("target")
+        })?;
+        Ok(config)
     }
 
     fn run(&self, config: &Config) -> Fallible<String> {
@@ -143,18 +147,19 @@ impl Opt {
             ..
         } = self;
 
-        let ws = cargo_linked::workspace(config, manifest_path)?;
-        let (compile_options, target) = CompileOptionsForSingleTarget {
-            ws: &ws,
-            debug: *debug,
-            lib: *lib,
-            bin,
-            test,
-            bench,
-            example,
-            manifest_path,
-        }
-        .find()?;
+        let ws = cargo_linked::util::workspace(config, manifest_path)?;
+        let (compile_options, target) = cargo_linked::util::compile_options_for_single_target(
+            CompileOptionsForSingleTargetArgs {
+                ws: &ws,
+                debug: *debug,
+                lib: *lib,
+                bin,
+                test,
+                bench,
+                example,
+                manifest_path,
+            },
+        )?;
 
         let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
         Ok(miniserde::json::to_string(&outcome))
