@@ -1,62 +1,18 @@
 use cargo_linked::util::CompileOptionsForSingleTargetArgs;
 
-use cargo::util::config::Config;
+use cargo::core::shell::Shell;
 use failure::Fallible;
 use structopt::StructOpt;
-use termcolor::{BufferedStandardStream, WriteColor as _};
 
 use std::io::{self, Write as _};
 use std::path::PathBuf;
-use std::process;
 
-fn main() -> Fallible<()> {
+fn main() {
     let opt = Opt::from_args();
-
-    let config = opt.configure()?;
-
-    match opt.run(&config) {
-        Ok(output) => io::stdout().write_all(output.as_ref()).map_err(Into::into),
-        Err(err) => {
-            let mut stderr = BufferedStandardStream::stderr(if config.shell().supports_color() {
-                termcolor::ColorChoice::Always
-            } else {
-                termcolor::ColorChoice::Never
-            });
-            writeln!(stderr)?;
-            for (i, cause) in err.as_fail().iter_chain().enumerate() {
-                let head = if i == 0 && err.as_fail().cause().is_none() {
-                    "error: "
-                } else if i == 0 {
-                    "    error: "
-                } else {
-                    "caused by: "
-                };
-                stderr.set_color(
-                    termcolor::ColorSpec::new()
-                        .set_fg(Some(termcolor::Color::Red))
-                        .set_bold(true),
-                )?;
-                stderr.write_all(head.as_ref())?;
-                stderr.reset()?;
-                for (i, line) in cause.to_string().lines().enumerate() {
-                    if i > 0 {
-                        (0..head.len()).try_for_each(|_| stderr.write_all(b" "))?;
-                    }
-                    writeln!(stderr, "{}", line)?;
-                }
-            }
-            let backtrace = err.backtrace().to_string();
-            if backtrace.is_empty() {
-                stderr.write_all(
-                    &b"note: Run with `RUST_BACKTRACE=1` environment varialbe to display a \
-                       backtrace\n"[..],
-                )?;
-            } else {
-                writeln!(stderr, "{}", backtrace)?;
-            }
-            stderr.flush()?;
-            process::exit(1)
-        }
+    let mut config = cargo::Config::default()
+        .unwrap_or_else(|e| cargo::exit_with_error(e.into(), &mut Shell::new()));
+    if let Err(err) = opt.run(&mut config) {
+        cargo::exit_with_error(err.into(), &mut config.shell())
     }
 }
 
@@ -122,20 +78,7 @@ enum Opt {
 }
 
 impl Opt {
-    fn configure(&self) -> Fallible<Config> {
-        let Self::Linked {
-            manifest_path,
-            color,
-            ..
-        } = self;
-        let mut config = cargo::Config::default()?;
-        cargo_linked::util::configure(&mut config, manifest_path, color, |target_dir| {
-            target_dir.join("cargo_linked").join("target")
-        })?;
-        Ok(config)
-    }
-
-    fn run(&self, config: &Config) -> Fallible<String> {
+    fn run(&self, config: &mut cargo::Config) -> Fallible<()> {
         let Self::Linked {
             debug,
             lib,
@@ -144,8 +87,12 @@ impl Opt {
             bench,
             example,
             manifest_path,
-            ..
+            color,
         } = self;
+
+        cargo_linked::util::configure(config, manifest_path, color, |target_dir| {
+            target_dir.join("cargo_linked").join("target")
+        })?;
 
         let ws = cargo_linked::util::workspace(config, manifest_path)?;
         let (compile_options, target) = cargo_linked::util::compile_options_for_single_target(
@@ -162,6 +109,7 @@ impl Opt {
         )?;
 
         let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
-        Ok(miniserde::json::to_string(&outcome))
+        let outcome = miniserde::json::to_string(&outcome);
+        io::stdout().write_all(outcome.as_ref()).map_err(Into::into)
     }
 }
