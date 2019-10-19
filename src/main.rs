@@ -2,6 +2,7 @@ use cargo_linked::util::CompileOptionsForSingleTargetArgs;
 
 use cargo::core::shell::Shell;
 use failure::Fallible;
+use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
 use std::io::{self, Write as _};
@@ -17,52 +18,52 @@ fn main() {
 }
 
 #[derive(Debug, StructOpt)]
-#[structopt(author, about, bin_name = "cargo")]
+#[structopt(
+    author,
+    about,
+    bin_name = "cargo",
+    global_settings(&[AppSettings::ColoredHelp, AppSettings::DeriveDisplayOrder])
+)]
 enum Opt {
     #[structopt(author, about, name = "linked")]
     Linked {
-        #[structopt(long, help = "Run in debug mode", display_order(1))]
+        #[structopt(long, help = "Run in debug mode")]
         debug: bool,
-        #[structopt(long, help = "Target the `lib`", display_order(2))]
+        #[structopt(long, help = "Target the `lib`")]
         lib: bool,
         #[structopt(
             long,
             value_name = "NAME",
             conflicts_with_all(&["lib", "example", "test", "bench"]),
-            help = "Target `bin`",
-            display_order(1)
+            help = "Target `bin`"
         )]
         bin: Option<String>,
         #[structopt(
             long,
             value_name = "NAME",
             conflicts_with_all(&["lib", "bin", "example", "bench"]),
-            help = "Target `test`",
-            display_order(2)
+            help = "Target `test`"
         )]
         test: Option<String>,
         #[structopt(
             long,
             value_name = "NAME",
             conflicts_with_all(&["lib", "bin", "example", "test"]),
-            help = "Target `bench`",
-            display_order(3)
+            help = "Target `bench`"
         )]
         bench: Option<String>,
         #[structopt(
             long,
             value_name = "NAME",
             conflicts_with_all(&["lib", "bin", "test", "bench"]),
-            help = "Target `example`",
-            display_order(4)
+            help = "Target `example`"
         )]
         example: Option<String>,
         #[structopt(
             long,
             value_name = "PATH",
             parse(from_os_str),
-            help = "Path to Cargo.toml",
-            display_order(5)
+            help = "Path to Cargo.toml"
         )]
         manifest_path: Option<PathBuf>,
         #[structopt(
@@ -70,8 +71,7 @@ enum Opt {
             value_name("WHEN"),
             default_value("auto"),
             possible_values(&["auto", "always", "never"]),
-            help("Coloring"),
-            display_order(6)
+            help("Coloring")
         )]
         color: String,
     },
