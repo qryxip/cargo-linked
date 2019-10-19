@@ -275,8 +275,8 @@ impl CacheUsedPackages {
 
 #[derive(Debug, Default)]
 pub struct LinkedPackages {
-    used: BTreeSet<PackageId>,
-    unused: LinkedPackagesUnused,
+    pub used: BTreeSet<PackageId>,
+    pub unused: LinkedPackagesUnused,
 }
 
 impl LinkedPackages {
