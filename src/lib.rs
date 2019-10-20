@@ -446,6 +446,7 @@ impl Executor for Exec {
         let uses = crate::parse::find_uses_lossy(
             target.src_path(),
             &cmd.externs().iter().map(|e| e.name()).collect(),
+            target.edition(),
         );
         let uses = match uses {
             Ok(uses) => uses,
