@@ -2,7 +2,7 @@ name: CI
 
 on:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: 0 0 * * 0
   push:
     branches:
       - master
@@ -30,6 +30,39 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-18.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Install toolchain and target
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-x86_64-unknown-linux-gnu
+          default: true
+
+      - name: '`cargo test`'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all --all-targets --all-features --no-fail-fast
+        env:
+          CARGO_INCREMENTAL: '0'
+          RUSTFLAGS: -Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Zno-landing-pads
+
+      - name: grcov
+        id: grcov
+        uses: actions-rs/grcov@v0.1
+
+      - name: Codecov
+        uses: codecov/codecov-action@v1.0.3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ${{ steps.grcov.outputs.report }}
 
   build:
     strategy:
@@ -109,7 +142,7 @@ jobs:
 
     name: GitHub Release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    needs: [rustfmt, build]
+    needs: [rustfmt, coverage, build]
     if: startsWith(github.ref, 'refs/tags/')
 
     steps:
@@ -143,7 +176,7 @@ jobs:
   publish:
     name: cargo pubish
     runs-on: ubuntu-18.04
-    needs: [rustfmt, build, release]
+    needs: [rustfmt, coverage, build, release]
     if: startsWith(github.ref, 'refs/tags/')
 
     steps:
