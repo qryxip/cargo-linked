@@ -1,7 +1,7 @@
 # cargo-linked
 
-![CI](https://github.com/qryxip/cargo-linked/workflows/CI/badge.svg)
-![Maintenance](https://img.shields.io/maintenance/yes/2019)
+[![CI](https://github.com/qryxip/cargo-linked/workflows/CI/badge.svg)](https://github.com/qryxip/cargo-linked/actions?workflow=CI)
+[![codecov](https://codecov.io/gh/qryxip/cargo-linked/branch/master/graph/badge.svg)](https://codecov.io/gh/qryxip/cargo-linked/branch/master)
 ![license](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue)
 [![dependency status](https://deps.rs/repo/github/qryxip/cargo-linked/status.svg)](https://deps.rs/repo/github/qryxip/cargo-linked)
 
