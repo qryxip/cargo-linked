@@ -2,7 +2,7 @@ use cargo_linked::LinkedPackages;
 
 use cargo::core::shell::Shell;
 use cargo::ops::Packages;
-use failure::Fallible;
+use cargo::CargoResult;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
@@ -95,7 +95,7 @@ struct OptLinked {
 }
 
 impl OptLinked {
-    fn run(self, config: &mut cargo::Config, mut stdout: impl Write) -> Fallible<()> {
+    fn run(self, config: &mut cargo::Config, mut stdout: impl Write) -> CargoResult<()> {
         let Self {
             lib,
             debug,

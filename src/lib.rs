@@ -64,7 +64,7 @@
 //!
 //! let LinkedPackages { used, unused } =
 //!     LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
-//! # failure::Fallible::Ok(())
+//! # cargo::CargoResult::Ok(())
 //! ```
 
 macro_rules! lazy_regex {
@@ -75,18 +75,10 @@ macro_rules! lazy_regex {
 
 pub mod util;
 
-mod error;
 mod fs;
 mod parse;
 mod process;
 mod ser;
-
-#[doc(inline)]
-pub use crate::error::{Error, ErrorKind};
-
-pub use cargo as cargo_0_39;
-pub use miniserde as miniserde_0_1;
-pub use serde as serde_1;
 
 use crate::fs::JsonFileLock;
 use crate::process::Rustc;
@@ -95,10 +87,9 @@ use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
-use cargo::ops::{CompileOptions, Packages};
+use cargo::ops::CompileOptions;
 use cargo::util::process_builder::ProcessBuilder;
 use cargo::CargoResult;
-use failure::ResultExt as _;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
 use maplit::{btreemap, btreeset, hashset};
@@ -110,9 +101,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::Index;
 use std::sync::{Arc, Mutex};
-
-/// Result.
-pub type Result<T> = std::result::Result<T, crate::Error>;
 
 #[derive(Default, serde::Deserialize)]
 #[serde(transparent)]
@@ -232,16 +220,14 @@ impl LinkedPackages {
         resolve: &Resolve,
         compile_opts: &CompileOptions,
         target: &Target,
-    ) -> crate::Result<Self> {
-        let current = ws.current().with_context(|_| crate::ErrorKind::Cargo)?;
+    ) -> CargoResult<Self> {
+        let current = ws.current()?;
 
-        let all_ids = cargo::ops::resolve_ws(ws)
-            .map(|(ps, _)| ps.package_ids().collect::<HashSet<_>>())
-            .with_context(|_| crate::ErrorKind::Cargo)?;
+        let all_ids =
+            cargo::ops::resolve_ws(ws).map(|(ps, _)| ps.package_ids().collect::<HashSet<_>>())?;
 
         let packages = packages
-            .get_many(packages.package_ids())
-            .with_context(|_| crate::ErrorKind::Cargo)?
+            .get_many(packages.package_ids())?
             .into_iter()
             .map(|p| (p.package_id(), p))
             .collect::<BTreeMap<_, _>>();
@@ -339,14 +325,12 @@ impl LinkedPackages {
 
                 Ok((from_pkg.package_id(), extern_crate_names))
             })
-            .collect::<CargoResult<HashMap<_, _>>>()
-            .with_context(|_| crate::ErrorKind::Cargo)?;
+            .collect::<CargoResult<HashMap<_, _>>>()?;
 
         let cache_file = ws
             .target_dir()
             .join("..")
-            .open_rw("cache.json", ws.config(), "msg?")
-            .with_context(|_| crate::ErrorKind::Cargo)?;
+            .open_rw("cache.json", ws.config(), "msg?")?;
         let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
         let mut cache = cache_file.read()?;
         let cache_key = CacheKey::new(compile_opts.build_config.release);
@@ -358,8 +342,7 @@ impl LinkedPackages {
             supports_color: ws.config().shell().supports_color(),
             store: store.clone(),
         });
-        cargo::ops::compile_with_exec(ws, compile_opts, &exec)
-            .with_context(|_| crate::ErrorKind::Cargo)?;
+        cargo::ops::compile_with_exec(ws, compile_opts, &exec)?;
         drop(exec);
 
         let ExecStore {

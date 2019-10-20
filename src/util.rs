@@ -3,8 +3,7 @@ use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::Workspace;
 use cargo::ops::CompileOptions;
 use cargo::util::command_prelude::ArgMatchesExt;
-use cargo::Config;
-use failure::ResultExt as _;
+use cargo::{CargoResult, Config};
 use maplit::hashmap;
 
 use std::collections::HashMap;
@@ -22,7 +21,7 @@ pub struct Configure<'a, F: FnOnce(PathBuf) -> PathBuf> {
 }
 
 impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
-    pub fn configure(self, config: &mut Config) -> crate::Result<()> {
+    pub fn configure(self, config: &mut Config) -> CargoResult<()> {
         let Self {
             manifest_path,
             color,
@@ -38,41 +37,33 @@ impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
         }
 
         let target_dir = arg_matches_from(args)
-            .workspace(&config)
-            .with_context(|_| crate::ErrorKind::Cargo)?
+            .workspace(&config)?
             .target_dir()
             .into_path_unlocked();
         let target_dir = modify_target_dir(target_dir);
 
-        config
-            .configure(
-                0,
-                None,
-                color,
-                frozen,
-                locked,
-                offline,
-                &Some(target_dir),
-                &[],
-            )
-            .with_context(|_| crate::ErrorKind::Cargo)
-            .map_err(Into::into)
+        config.configure(
+            0,
+            None,
+            color,
+            frozen,
+            locked,
+            offline,
+            &Some(target_dir),
+            &[],
+        )
     }
 }
 
 pub fn workspace<'a>(
     config: &'a Config,
     manifest_path: &Option<PathBuf>,
-) -> crate::Result<Workspace<'a>> {
+) -> CargoResult<Workspace<'a>> {
     let mut args = hashmap!();
     if let Some(manifest_path) = manifest_path {
         args.insert("manifest-path", vec![OsString::from(manifest_path)]);
     }
-
-    arg_matches_from(args)
-        .workspace(config)
-        .with_context(|_| crate::ErrorKind::Cargo)
-        .map_err(Into::into)
+    arg_matches_from(args).workspace(config)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -94,7 +85,7 @@ pub struct CompileOptionsForSingleTarget<'a, 'b> {
 impl<'a> CompileOptionsForSingleTarget<'a, '_> {
     pub fn compile_options_for_single_target(
         self,
-    ) -> crate::Result<(CompileOptions<'a>, &'a Target)> {
+    ) -> CargoResult<(CompileOptions<'a>, &'a Target)> {
         let Self {
             ws,
             jobs,
@@ -127,19 +118,14 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
             args.insert("manifest-path", vec![manifest_path.into()]);
         }
 
-        let current = ws.current().with_context(|_| crate::ErrorKind::Cargo)?;
+        let current = ws.current()?;
 
         let find_by_name = |name: &str, kind: &'static str| -> _ {
             current
                 .targets()
                 .iter()
                 .find(|t| t.name() == name && t.kind().description() == kind)
-                .ok_or_else(|| {
-                    crate::Error::from(crate::ErrorKind::NoSuchTarget {
-                        kind,
-                        name: Some(name.to_owned()),
-                    })
-                })
+                .ok_or_else(|| failure::err_msg(format!("No such `{}`: {}", kind, name)))
         };
 
         if release {
@@ -151,9 +137,8 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
                 .targets()
                 .iter()
                 .find(|t| t.is_lib())
-                .ok_or_else(|| crate::ErrorKind::NoSuchTarget {
-                    kind: "lib",
-                    name: None,
+                .ok_or_else(|| {
+                    failure::err_msg("Current workspace member does not contain `lib`")
                 })?;
             ("lib", vec![], target)
         } else if let Some(bin) = bin {
@@ -180,7 +165,7 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
                 let name = current
                     .manifest()
                     .default_run()
-                    .ok_or_else(|| crate::ErrorKind::AmbiguousTarget)?;
+                    .ok_or_else(|| failure::err_msg("Could not determine which binary to run"))?;
                 find_by_name(name, "bin")?
             };
             ("bin", vec![OsString::from(target.name())], target)
@@ -188,9 +173,8 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
 
         args.insert(arg_key, arg_val);
 
-        let compile_options = arg_matches_from(args)
-            .compile_options(ws.config(), CompileMode::Build, Some(ws))
-            .with_context(|_| crate::ErrorKind::Cargo)?;
+        let compile_options =
+            arg_matches_from(args).compile_options(ws.config(), CompileMode::Build, Some(ws))?;
         Ok((compile_options, target))
     }
 }
