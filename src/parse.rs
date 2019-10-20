@@ -1,4 +1,5 @@
 use cargo::core::manifest::TargetSourcePath;
+use cargo::core::Edition;
 use failure::Fallible;
 use maplit::{btreeset, hashset};
 use syn::visit::{self, Visit};
@@ -8,6 +9,41 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 pub(crate) fn find_uses_lossy<'a>(
+    src: &TargetSourcePath,
+    extern_crates: &HashSet<&'a str>,
+    edition: Edition,
+) -> Fallible<HashSet<&'a str>> {
+    match edition {
+        Edition::Edition2015 => find_uses_lossy_2015(src, extern_crates),
+        Edition::Edition2018 => find_uses_lossy_2018(src, extern_crates),
+    }
+}
+
+fn find_uses_lossy_2015<'a>(
+    src: &TargetSourcePath,
+    extern_crates: &HashSet<&'a str>,
+) -> Fallible<HashSet<&'a str>> {
+    let root_path = match src.path() {
+        None => return Ok(hashset!()),
+        Some(path) => path,
+    };
+    let file = crate::fs::read_src(root_path)?;
+    if !file.attrs.is_empty() {
+        return Ok(hashset!());
+    }
+    Ok(file
+        .items
+        .into_iter()
+        .flat_map(|item| match item {
+            Item::ExternCrate(item) => Some(item),
+            _ => None,
+        })
+        .filter(|item| item.attrs.is_empty())
+        .flat_map(|item| extern_crates.get(&*item.ident.to_string()).cloned())
+        .collect())
+}
+
+fn find_uses_lossy_2018<'a>(
     src: &TargetSourcePath,
     extern_crates: &HashSet<&'a str>,
 ) -> Fallible<HashSet<&'a str>> {
@@ -128,14 +164,14 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn test_find_uses_lossy() -> Fallible<()> {
+    fn test_find_uses_lossy_2018() -> Fallible<()> {
         static PATH: Lazy<TargetSourcePath> = Lazy::new(|| TargetSourcePath::Path(file!().into()));
         static EXTERN_CRATES: Lazy<HashSet<&str>> =
             Lazy::new(|| hashset!("cargo", "failure", "maplit", "once_cell", "syn"));
         static EXPECTED: Lazy<HashSet<&str>> =
             Lazy::new(|| hashset!("cargo", "failure", "maplit", "syn"));
 
-        let used = super::find_uses_lossy(&PATH, &EXTERN_CRATES)?;
+        let used = super::find_uses_lossy_2018(&PATH, &EXTERN_CRATES)?;
         assert_eq!(used, *EXPECTED);
         Ok(())
     }
