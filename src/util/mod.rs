@@ -84,7 +84,7 @@ pub struct CompileOptionsForSingleTarget<'a, 'b> {
     pub example: &'b Option<String>,
     pub test: &'b Option<String>,
     pub bench: &'b Option<String>,
-    pub debug: bool,
+    pub release: bool,
     pub features: &'b [String],
     pub all_features: bool,
     pub no_default_features: bool,
@@ -103,7 +103,7 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
             example,
             test,
             bench,
-            debug,
+            release,
             features,
             all_features,
             no_default_features,
@@ -142,7 +142,7 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
                 })
         };
 
-        if !debug {
+        if release {
             args.insert("release", vec![]);
         }
 

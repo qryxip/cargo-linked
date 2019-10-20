@@ -1,16 +1,19 @@
+use cargo_linked::LinkedPackages;
+
 use cargo::core::shell::Shell;
+use cargo::ops::Packages;
 use failure::Fallible;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
 
-use std::io::{self, Write as _};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 fn main() {
     let Opt::Linked(opt) = Opt::from_args();
     let mut config = cargo::Config::default()
         .unwrap_or_else(|e| cargo::exit_with_error(e.into(), &mut Shell::new()));
-    if let Err(err) = opt.run(&mut config) {
+    if let Err(err) = opt.run(&mut config, io::stdout()) {
         cargo::exit_with_error(err.into(), &mut config.shell())
     }
 }
@@ -92,7 +95,7 @@ struct OptLinked {
 }
 
 impl OptLinked {
-    fn run(self, config: &mut cargo::Config) -> Fallible<()> {
+    fn run(self, config: &mut cargo::Config, mut stdout: impl Write) -> Fallible<()> {
         let Self {
             lib,
             debug,
@@ -122,6 +125,17 @@ impl OptLinked {
         .configure(config)?;
 
         let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+
+        let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
+            cargo::ops::resolve_ws_precisely(
+                &ws,
+                &features,
+                all_features,
+                no_default_features,
+                &specs,
+            )
+        })?;
+
         let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
             ws: &ws,
             jobs: &jobs,
@@ -130,7 +144,7 @@ impl OptLinked {
             example: &example,
             test: &test,
             bench: &bench,
-            debug,
+            release: !debug,
             features: &features,
             all_features,
             no_default_features,
@@ -138,8 +152,8 @@ impl OptLinked {
         }
         .compile_options_for_single_target()?;
 
-        let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
+        let outcome = LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
         let outcome = miniserde::json::to_string(&outcome);
-        io::stdout().write_all(outcome.as_ref()).map_err(Into::into)
+        stdout.write_all(outcome.as_ref()).map_err(Into::into)
     }
 }

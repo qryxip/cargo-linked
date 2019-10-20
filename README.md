@@ -217,6 +217,9 @@ $ cargo linked --debug 2>&- | jq
 ### `lib`
 
 ```rust
+use cargo::ops::Packages;
+use cargo_linked::LinkedPackages;
+
 use std::path::PathBuf;
 
 let jobs: Option<String> = unimplemented!();
@@ -225,7 +228,7 @@ let bin: Option<String> = unimplemented!();
 let example: Option<String> = unimplemented!();
 let test: Option<String> = unimplemented!();
 let bench: Option<String> = unimplemented!();
-let debug: bool = unimplemented!();
+let release: bool = unimplemented!();
 let features: Vec<String> = unimplemented!();
 let all_features: bool = unimplemented!();
 let no_default_features: bool = unimplemented!();
@@ -248,6 +251,17 @@ cargo_linked::util::Configure {
 .configure(&mut config)?;
 
 let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+
+let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
+    cargo::ops::resolve_ws_precisely(
+        &ws,
+        &features,
+        all_features,
+        no_default_features,
+        &specs,
+    )
+})?;
+
 let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
     ws: &ws,
     jobs: &jobs,
@@ -256,7 +270,7 @@ let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarge
     example: &example,
     test: &test,
     bench: &bench,
-    debug,
+    release,
     features: &features,
     all_features,
     no_default_features,
@@ -264,7 +278,9 @@ let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarge
 }
 .compile_options_for_single_target()?;
 
-let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
+let LinkedPackages { used, unused } =
+    LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
+# failure::Fallible::Ok(())
 ```
 
 ## License
