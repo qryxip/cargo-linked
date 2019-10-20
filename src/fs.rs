@@ -21,33 +21,33 @@ pub(crate) struct JsonFileLock<T: Default + miniserde::Serialize + DeserializeOw
 }
 
 impl<T: Default + miniserde::Serialize + DeserializeOwned> JsonFileLock<T> {
-    pub(crate) fn read(&mut self) -> crate::Result<T> {
+    pub(crate) fn read(&mut self) -> Fallible<T> {
         let mut value = "".to_owned();
         self.lock
             .seek(SeekFrom::Start(0))
             .and_then(|_| self.lock.read_to_string(&mut value))
-            .with_context(|_| crate::ErrorKind::ReadFile {
-                path: self.lock.path().to_owned(),
+            .with_context(|_| {
+                failure::err_msg(format!("Failed to read {}", self.lock.path().display()))
             })?;
         if value.is_empty() {
             Ok(T::default())
         } else {
             serde_json::from_str(&value)
-                .with_context(|_| crate::ErrorKind::ReadFile {
-                    path: self.lock.path().to_owned(),
+                .with_context(|_| {
+                    failure::err_msg(format!("Failed to read {}", self.lock.path().display()))
                 })
                 .map_err(Into::into)
         }
     }
 
-    pub(crate) fn write(&mut self, value: &T) -> crate::Result<()> {
+    pub(crate) fn write(&mut self, value: &T) -> Fallible<()> {
         let value = miniserde::json::to_string(&value);
         self.lock
             .seek(SeekFrom::Start(0))
             .and_then(|_| self.lock.file().set_len(0))
             .and_then(|_| self.lock.write_all(value.as_ref()))
-            .with_context(|_| crate::ErrorKind::WriteFile {
-                path: self.lock.path().to_owned(),
+            .with_context(|_| {
+                failure::err_msg(format!("Failed to write {}", self.lock.path().display()))
             })
             .map_err(Into::into)
     }

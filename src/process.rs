@@ -3,7 +3,7 @@ use cargo::core::package_id::PackageId;
 use cargo::util::errors::{CargoResult, ProcessError};
 use cargo::util::process_builder::ProcessBuilder;
 use derive_more::Display;
-use failure::ResultExt as _;
+use failure::{Fallible, ResultExt as _};
 use fixedbitset::FixedBitSet;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -325,14 +325,13 @@ impl Extern {
 }
 
 impl FromStr for Extern {
-    type Err = crate::Error;
+    type Err = failure::Error;
 
-    fn from_str(s: &str) -> crate::Result<Self> {
+    fn from_str(s: &str) -> Fallible<Self> {
         static EXTERN: Lazy<Regex> = lazy_regex!(r"\A([a-zA-Z0-9_]+)=.*\z");
 
         let caps = EXTERN.captures(s).ok_or_else(|| {
-            let (text, regex) = (s.to_owned(), EXTERN.as_str());
-            crate::ErrorKind::Regex { text, regex }
+            failure::err_msg(format!("{:?} does not match {:?}", s, EXTERN.as_str()))
         })?;
         Ok(Self {
             string: s.to_owned(),
