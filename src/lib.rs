@@ -1,6 +1,9 @@
 //! List actually used crates.
 //!
 //! ```no_run
+//! use cargo::ops::Packages;
+//! use cargo_linked::LinkedPackages;
+//!
 //! use std::path::PathBuf;
 //!
 //! let jobs: Option<String> = unimplemented!();
@@ -9,7 +12,7 @@
 //! let example: Option<String> = unimplemented!();
 //! let test: Option<String> = unimplemented!();
 //! let bench: Option<String> = unimplemented!();
-//! let debug: bool = unimplemented!();
+//! let release: bool = unimplemented!();
 //! let features: Vec<String> = unimplemented!();
 //! let all_features: bool = unimplemented!();
 //! let no_default_features: bool = unimplemented!();
@@ -32,6 +35,17 @@
 //! .configure(&mut config)?;
 //!
 //! let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+//!
+//! let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
+//!     cargo::ops::resolve_ws_precisely(
+//!         &ws,
+//!         &features,
+//!         all_features,
+//!         no_default_features,
+//!         &specs,
+//!     )
+//! })?;
+//!
 //! let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
 //!     ws: &ws,
 //!     jobs: &jobs,
@@ -40,7 +54,7 @@
 //!     example: &example,
 //!     test: &test,
 //!     bench: &bench,
-//!     debug,
+//!     release,
 //!     features: &features,
 //!     all_features,
 //!     no_default_features,
@@ -48,7 +62,8 @@
 //! }
 //! .compile_options_for_single_target()?;
 //!
-//! let outcome = cargo_linked::LinkedPackages::find(&ws, &compile_options, target)?;
+//! let LinkedPackages { used, unused } =
+//!     LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
 //! # failure::Fallible::Ok(())
 //! ```
 
@@ -79,7 +94,7 @@ use crate::process::Rustc;
 use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
-use cargo::core::{dependency, Package, PackageId, Workspace};
+use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
 use cargo::ops::{CompileOptions, Packages};
 use cargo::util::process_builder::ProcessBuilder;
 use cargo::CargoResult;
@@ -213,6 +228,8 @@ pub struct LinkedPackages {
 impl LinkedPackages {
     pub fn find(
         ws: &Workspace,
+        packages: &PackageSet,
+        resolve: &Resolve,
         compile_opts: &CompileOptions,
         target: &Target,
     ) -> crate::Result<Self> {
@@ -220,11 +237,6 @@ impl LinkedPackages {
 
         let all_ids = cargo::ops::resolve_ws(ws)
             .map(|(ps, _)| ps.package_ids().collect::<HashSet<_>>())
-            .with_context(|_| crate::ErrorKind::Cargo)?;
-
-        let (packages, resolve) = Packages::All
-            .to_package_id_specs(ws)
-            .and_then(|specs| cargo::ops::resolve_ws_precisely(ws, &[], false, false, &specs))
             .with_context(|_| crate::ErrorKind::Cargo)?;
 
         let packages = packages
