@@ -173,8 +173,11 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
 
         args.insert(arg_key, arg_val);
 
-        let compile_options =
-            arg_matches_from(args).compile_options(ws.config(), CompileMode::Build, Some(ws))?;
+        let compile_options = arg_matches_from(args).compile_options(
+            ws.config(),
+            CompileMode::Check { test: false },
+            Some(ws),
+        )?;
         Ok((compile_options, target))
     }
 }
