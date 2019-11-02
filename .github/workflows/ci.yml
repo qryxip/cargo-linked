@@ -121,7 +121,7 @@ jobs:
           args: --all --all-targets --all-features --no-fail-fast
 
       - name: Run
-        run: cargo run --all-features -- linked --debug | jq .
+        run: cargo run --all-features -- linked --debug --demonstrate | jq .
         shell: bash
 
   release:
