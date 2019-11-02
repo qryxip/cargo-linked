@@ -1,6 +1,7 @@
 //! List actually used crates.
 //!
 //! ```no_run
+//! use cargo::core::compiler::CompileMode;
 //! use cargo::ops::Packages;
 //! use cargo_linked::LinkedPackages;
 //!
@@ -46,7 +47,7 @@
 //!     )
 //! })?;
 //!
-//! let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
+//! let (compile_opts, target) = cargo_linked::util::CompileOptionsForSingleTarget {
 //!     ws: &ws,
 //!     jobs: &jobs,
 //!     lib,
@@ -59,11 +60,48 @@
 //!     all_features,
 //!     no_default_features,
 //!     manifest_path: &manifest_path,
+//!     compile_mode: CompileMode::Check {
+//!         test: test.is_some(),
+//!     },
 //! }
 //! .compile_options_for_single_target()?;
 //!
 //! let LinkedPackages { used, unused } =
-//!     LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
+//!     LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
+//!
+//! let demonstrate: bool = unimplemented!();
+//! if demonstrate {
+//!     cargo_linked::util::Configure {
+//!         manifest_path: &manifest_path,
+//!         color: &color,
+//!         frozen,
+//!         locked,
+//!         offline,
+//!         modify_target_dir: |d| d.parent().unwrap().join("target"),
+//!     }
+//!     .configure(&mut config)?;
+//!
+//!     let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+//!
+//!     let (compile_opts, _) = cargo_linked::util::CompileOptionsForSingleTarget {
+//!         ws: &ws,
+//!         jobs: &jobs,
+//!         lib,
+//!         bin: &bin,
+//!         example: &example,
+//!         test: &test,
+//!         bench: &bench,
+//!         release,
+//!         features: &features,
+//!         all_features,
+//!         no_default_features,
+//!         manifest_path: &manifest_path,
+//!         compile_mode: CompileMode::Build,
+//!     }
+//!     .compile_options_for_single_target()?;
+//!
+//!     cargo_linked::demonstrate(&ws, &compile_opts, used.clone())?;
+//! }
 //! # cargo::CargoResult::Ok(())
 //! ```
 
@@ -84,7 +122,7 @@ use crate::fs::JsonFileLock;
 use crate::process::Rustc;
 
 use ansi_term::Colour;
-use cargo::core::compiler::{CompileMode, Executor, Unit};
+use cargo::core::compiler::{CompileMode, DefaultExecutor, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
 use cargo::ops::CompileOptions;
@@ -101,6 +139,41 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::ops::Index;
 use std::sync::{Arc, Mutex};
+
+pub fn demonstrate(
+    ws: &Workspace,
+    compile_opts: &CompileOptions,
+    used: BTreeSet<PackageId>,
+) -> CargoResult<()> {
+    struct Exec {
+        used: BTreeSet<PackageId>,
+    }
+
+    impl Executor for Exec {
+        fn exec(
+            &self,
+            cmd: ProcessBuilder,
+            id: PackageId,
+            target: &Target,
+            mode: CompileMode,
+            on_stdout_line: &mut dyn FnMut(&str) -> CargoResult<()>,
+            on_stderr_line: &mut dyn FnMut(&str) -> CargoResult<()>,
+        ) -> CargoResult<()> {
+            // `compile_with_exec` runs `buiid-script-build`s outside of `exec`.
+            if self.used.contains(&id) || target.is_custom_build() {
+                DefaultExecutor.exec(cmd, id, target, mode, on_stdout_line, on_stderr_line)?;
+            }
+            Ok(())
+        }
+
+        fn force_rebuild(&self, _: &Unit) -> bool {
+            true
+        }
+    }
+
+    let exec: Arc<dyn Executor + 'static> = Arc::new(Exec { used });
+    cargo::ops::compile_with_exec(ws, &compile_opts, &exec).map(|_| ())
+}
 
 #[derive(Default, serde::Deserialize)]
 #[serde(transparent)]

@@ -80,6 +80,7 @@ pub struct CompileOptionsForSingleTarget<'a, 'b> {
     pub all_features: bool,
     pub no_default_features: bool,
     pub manifest_path: &'b Option<PathBuf>,
+    pub compile_mode: CompileMode,
 }
 
 impl<'a> CompileOptionsForSingleTarget<'a, '_> {
@@ -99,6 +100,7 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
             all_features,
             no_default_features,
             manifest_path,
+            compile_mode,
         } = self;
 
         let mut args = hashmap!();
@@ -173,12 +175,9 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
 
         args.insert(arg_key, arg_val);
 
-        let compile_options = arg_matches_from(args).compile_options(
-            ws.config(),
-            CompileMode::Check { test: false },
-            Some(ws),
-        )?;
-        Ok((compile_options, target))
+        let compile_opts =
+            arg_matches_from(args.clone()).compile_options(ws.config(), compile_mode, Some(ws))?;
+        Ok((compile_opts, target))
     }
 }
 

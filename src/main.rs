@@ -1,5 +1,6 @@
 use cargo_linked::LinkedPackages;
 
+use cargo::core::compiler::CompileMode;
 use cargo::core::shell::Shell;
 use cargo::ops::Packages;
 use cargo::CargoResult;
@@ -32,6 +33,8 @@ enum Opt {
 
 #[derive(Debug, StructOpt)]
 struct OptLinked {
+    #[structopt(long, help("Build the target skipping the \"unused\" crates"))]
+    demonstrate: bool,
     #[structopt(long, help("Target the `lib`"))]
     lib: bool,
     #[structopt(long, help("Run in debug mode"))]
@@ -97,6 +100,7 @@ struct OptLinked {
 impl OptLinked {
     fn run(self, config: &mut cargo::Config, mut stdout: impl Write) -> CargoResult<()> {
         let Self {
+            demonstrate,
             lib,
             debug,
             all_features,
@@ -120,7 +124,7 @@ impl OptLinked {
             frozen,
             locked,
             offline,
-            modify_target_dir: |d| d.join("cargo_linked").join("target"),
+            modify_target_dir: |d| d.join("cargo_linked").join("check"),
         }
         .configure(config)?;
 
@@ -136,7 +140,7 @@ impl OptLinked {
             )
         })?;
 
-        let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
+        let (compile_opts, target) = cargo_linked::util::CompileOptionsForSingleTarget {
             ws: &ws,
             jobs: &jobs,
             lib,
@@ -149,11 +153,51 @@ impl OptLinked {
             all_features,
             no_default_features,
             manifest_path: &manifest_path,
+            compile_mode: CompileMode::Check {
+                test: test.is_some(),
+            },
         }
         .compile_options_for_single_target()?;
 
-        let outcome = LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
+        let outcome = LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
+
+        if demonstrate {
+            drop(packages);
+
+            cargo_linked::util::Configure {
+                manifest_path: &manifest_path,
+                color: &color,
+                frozen,
+                locked,
+                offline,
+                modify_target_dir: |d| d.parent().unwrap().join("demonstrate"),
+            }
+            .configure(config)?;
+
+            let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+
+            let (compile_opts, _) = cargo_linked::util::CompileOptionsForSingleTarget {
+                ws: &ws,
+                jobs: &jobs,
+                lib,
+                bin: &bin,
+                example: &example,
+                test: &test,
+                bench: &bench,
+                release: !debug,
+                features: &features,
+                all_features,
+                no_default_features,
+                manifest_path: &manifest_path,
+                compile_mode: CompileMode::Build,
+            }
+            .compile_options_for_single_target()?;
+
+            cargo_linked::demonstrate(&ws, &compile_opts, outcome.used.clone())?;
+        }
+
         let outcome = miniserde::json::to_string(&outcome);
-        stdout.write_all(outcome.as_ref()).map_err(Into::into)
+        stdout.write_all(outcome.as_ref())?;
+        stdout.flush().map_err(Into::into)
     }
 }

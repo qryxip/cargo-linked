@@ -28,6 +28,7 @@ USAGE:
     cargo linked [FLAGS] [OPTIONS]
 
 FLAGS:
+        --demonstrate            Build the target skipping the "unused" crates
         --lib                    Target the `lib`
         --debug                  Run in debug mode
         --all-features           Activate all available features
@@ -217,6 +218,7 @@ $ cargo linked --debug 2>&- | jq
 ### `lib`
 
 ```rust
+use cargo::core::compiler::CompileMode;
 use cargo::ops::Packages;
 use cargo_linked::LinkedPackages;
 
@@ -262,7 +264,7 @@ let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs
     )
 })?;
 
-let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarget {
+let (compile_opts, target) = cargo_linked::util::CompileOptionsForSingleTarget {
     ws: &ws,
     jobs: &jobs,
     lib,
@@ -275,12 +277,48 @@ let (compile_options, target) = cargo_linked::util::CompileOptionsForSingleTarge
     all_features,
     no_default_features,
     manifest_path: &manifest_path,
+    compile_mode: CompileMode::Check {
+        test: test.is_some(),
+    },
 }
 .compile_options_for_single_target()?;
 
 let LinkedPackages { used, unused } =
-    LinkedPackages::find(&ws, &packages, &resolve, &compile_options, target)?;
-# failure::Fallible::Ok(())
+    LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
+
+let demonstrate: bool = unimplemented!();
+if demonstrate {
+    cargo_linked::util::Configure {
+        manifest_path: &manifest_path,
+        color: &color,
+        frozen,
+        locked,
+        offline,
+        modify_target_dir: |d| d.parent().unwrap().join("target"),
+    }
+    .configure(&mut config)?;
+
+    let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
+
+    let (compile_opts, _) = cargo_linked::util::CompileOptionsForSingleTarget {
+        ws: &ws,
+        jobs: &jobs,
+        lib,
+        bin: &bin,
+        example: &example,
+        test: &test,
+        bench: &bench,
+        release,
+        features: &features,
+        all_features,
+        no_default_features,
+        manifest_path: &manifest_path,
+        compile_mode: CompileMode::Build,
+    }
+    .compile_options_for_single_target()?;
+
+    cargo_linked::demonstrate(&ws, &compile_opts, used.clone())?;
+}
 ```
 
 ## License
