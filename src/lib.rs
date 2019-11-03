@@ -1,107 +1,29 @@
 //! List actually used crates.
 //!
 //! ```no_run
-//! use cargo::core::compiler::CompileMode;
-//! use cargo::ops::Packages;
-//! use cargo_linked::LinkedPackages;
-//!
-//! use std::path::PathBuf;
-//!
-//! let jobs: Option<String> = unimplemented!();
-//! let lib: bool = unimplemented!();
-//! let bin: Option<String> = unimplemented!();
-//! let example: Option<String> = unimplemented!();
-//! let test: Option<String> = unimplemented!();
-//! let bench: Option<String> = unimplemented!();
-//! let release: bool = unimplemented!();
-//! let features: Vec<String> = unimplemented!();
-//! let all_features: bool = unimplemented!();
-//! let no_default_features: bool = unimplemented!();
-//! let manifest_path: Option<PathBuf> = unimplemented!();
-//! let color: Option<String> = unimplemented!();
-//! let frozen: bool = unimplemented!();
-//! let locked: bool = unimplemented!();
-//! let offline: bool = unimplemented!();
+//! use cargo_linked::{CargoLinked, LinkedPackages};
 //!
 //! let mut config = cargo::Config::default()?;
 //!
-//! cargo_linked::util::Configure {
-//!     manifest_path: &manifest_path,
-//!     color: &color,
-//!     frozen,
-//!     locked,
-//!     offline,
-//!     modify_target_dir: |d| d.join("cargo_linked").join("target"),
+//! let LinkedPackages { used, unused } = CargoLinked {
+//!     demonstrate: unimplemented!(),
+//!     lib: unimplemented!(),
+//!     debug: unimplemented!(),
+//!     all_features: unimplemented!(),
+//!     no_default_features: unimplemented!(),
+//!     frozen: unimplemented!(),
+//!     locked: unimplemented!(),
+//!     offline: unimplemented!(),
+//!     jobs: unimplemented!(),
+//!     bin: unimplemented!(),
+//!     example: unimplemented!(),
+//!     test: unimplemented!(),
+//!     bench: unimplemented!(),
+//!     features: unimplemented!(),
+//!     manifest_path: unimplemented!(),
+//!     color: unimplemented!(),
 //! }
-//! .configure(&mut config)?;
-//!
-//! let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
-//!
-//! let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
-//!     cargo::ops::resolve_ws_precisely(
-//!         &ws,
-//!         &features,
-//!         all_features,
-//!         no_default_features,
-//!         &specs,
-//!     )
-//! })?;
-//!
-//! let (compile_opts, target) = cargo_linked::util::CompileOptionsForSingleTarget {
-//!     ws: &ws,
-//!     jobs: &jobs,
-//!     lib,
-//!     bin: &bin,
-//!     example: &example,
-//!     test: &test,
-//!     bench: &bench,
-//!     release,
-//!     features: &features,
-//!     all_features,
-//!     no_default_features,
-//!     manifest_path: &manifest_path,
-//!     compile_mode: CompileMode::Check {
-//!         test: test.is_some(),
-//!     },
-//! }
-//! .compile_options_for_single_target()?;
-//!
-//! let LinkedPackages { used, unused } =
-//!     LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
-//!
-//! let demonstrate: bool = unimplemented!();
-//! if demonstrate {
-//!     cargo_linked::util::Configure {
-//!         manifest_path: &manifest_path,
-//!         color: &color,
-//!         frozen,
-//!         locked,
-//!         offline,
-//!         modify_target_dir: |d| d.parent().unwrap().join("target"),
-//!     }
-//!     .configure(&mut config)?;
-//!
-//!     let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
-//!
-//!     let (compile_opts, _) = cargo_linked::util::CompileOptionsForSingleTarget {
-//!         ws: &ws,
-//!         jobs: &jobs,
-//!         lib,
-//!         bin: &bin,
-//!         example: &example,
-//!         test: &test,
-//!         bench: &bench,
-//!         release,
-//!         features: &features,
-//!         all_features,
-//!         no_default_features,
-//!         manifest_path: &manifest_path,
-//!         compile_mode: CompileMode::Build,
-//!     }
-//!     .compile_options_for_single_target()?;
-//!
-//!     cargo_linked::demonstrate(&ws, &compile_opts, used.clone())?;
-//! }
+//! .outcome(&mut config)?;
 //! # cargo::CargoResult::Ok(())
 //! ```
 
@@ -111,12 +33,11 @@ macro_rules! lazy_regex {
     };
 }
 
-pub mod util;
-
 mod fs;
 mod parse;
 mod process;
 mod ser;
+mod util;
 
 use crate::fs::JsonFileLock;
 use crate::process::Rustc;
@@ -125,22 +46,217 @@ use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, DefaultExecutor, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
-use cargo::ops::CompileOptions;
+use cargo::ops::{CompileOptions, Packages};
 use cargo::util::process_builder::ProcessBuilder;
-use cargo::CargoResult;
+use cargo::{CargoResult, CliResult};
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
 use maplit::{btreemap, btreeset, hashset};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use structopt::clap::AppSettings;
+use structopt::StructOpt;
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::Write;
 use std::ops::Index;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-pub fn demonstrate(
+#[derive(Debug, StructOpt)]
+#[structopt(
+    author,
+    about,
+    bin_name("cargo"),
+    global_settings(&[AppSettings::ColoredHelp, AppSettings::DeriveDisplayOrder])
+)]
+pub enum Cargo {
+    #[structopt(author, about, name = "linked")]
+    Linked(CargoLinked),
+}
+
+#[derive(Debug, StructOpt)]
+pub struct CargoLinked {
+    #[structopt(long, help("Build the target skipping the \"unused\" crates"))]
+    pub demonstrate: bool,
+    #[structopt(long, help("Target the `lib`"))]
+    pub lib: bool,
+    #[structopt(long, help("Run in debug mode"))]
+    pub debug: bool,
+    #[structopt(long, help("Activate all available features"))]
+    pub all_features: bool,
+    #[structopt(long, help("Do not activate the `default` config"))]
+    pub no_default_features: bool,
+    #[structopt(long, help("Require Cargo.lock and cache are up to date"))]
+    pub frozen: bool,
+    #[structopt(long, help("Require Cargo.lock is up to date"))]
+    pub locked: bool,
+    #[structopt(long, help("Run without accessing the network"))]
+    pub offline: bool,
+    #[structopt(
+        short,
+        long,
+        value_name("N"),
+        help("Number of parallel jobs, defaults to # of CPUs")
+    )]
+    pub jobs: Option<String>,
+    #[structopt(
+        long,
+        value_name("NAME"),
+        conflicts_with_all(&["lib", "example", "test", "bench"]),
+        help("Target the `bin`")
+    )]
+    pub bin: Option<String>,
+    #[structopt(
+        long,
+        value_name("NAME"),
+        conflicts_with_all(&["lib", "bin", "test", "bench"]),
+        help("Target the `example`")
+    )]
+    pub example: Option<String>,
+    #[structopt(
+        long,
+        value_name("NAME"),
+        conflicts_with_all(&["lib", "bin", "example", "bench"]),
+        help("Target the `test`")
+    )]
+    pub test: Option<String>,
+    #[structopt(
+        long,
+        value_name("NAME"),
+        conflicts_with_all(&["lib", "bin", "example", "test"]),
+        help("Target the `bench`")
+    )]
+    pub bench: Option<String>,
+    #[structopt(
+        long,
+        value_name("FEATURES"),
+        min_values(1),
+        help("Space-separated list of features to activate")
+    )]
+    pub features: Vec<String>,
+    #[structopt(long, value_name("PATH"), help("Path to Cargo.toml"))]
+    pub manifest_path: Option<PathBuf>,
+    #[structopt(long, value_name("WHEN"), help("Coloring: auto, always, never"))]
+    pub color: Option<String>,
+}
+
+impl CargoLinked {
+    pub fn run(self, config: &mut cargo::Config, mut stdout: impl Write) -> CliResult {
+        let outcome = self.outcome(config)?;
+        let outcome = miniserde::json::to_string(&outcome);
+        stdout
+            .write_all(outcome.as_ref())
+            .and_then(|()| stdout.flush())
+            .map_err(failure::Error::from)
+            .map_err(Into::into)
+    }
+
+    pub fn outcome(self, config: &mut cargo::Config) -> CargoResult<LinkedPackages> {
+        let Self {
+            demonstrate,
+            lib,
+            debug,
+            all_features,
+            no_default_features,
+            frozen,
+            locked,
+            offline,
+            jobs,
+            bin,
+            example,
+            test,
+            bench,
+            features,
+            manifest_path,
+            color,
+        } = self;
+
+        util::Configure {
+            manifest_path: &manifest_path,
+            color: &color,
+            frozen,
+            locked,
+            offline,
+            modify_target_dir: |d| d.join("cargo_linked").join("check"),
+        }
+        .configure(config)?;
+
+        let ws = util::workspace(&config, &manifest_path)?;
+
+        let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
+            cargo::ops::resolve_ws_precisely(
+                &ws,
+                &features,
+                all_features,
+                no_default_features,
+                &specs,
+            )
+        })?;
+
+        let (compile_opts, target) = util::CompileOptionsForSingleTarget {
+            ws: &ws,
+            jobs: &jobs,
+            lib,
+            bin: &bin,
+            example: &example,
+            test: &test,
+            bench: &bench,
+            release: !debug,
+            features: &features,
+            all_features,
+            no_default_features,
+            manifest_path: &manifest_path,
+            compile_mode: CompileMode::Check {
+                test: test.is_some(),
+            },
+        }
+        .compile_options_for_single_target()?;
+
+        let outcome = LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
+
+        if demonstrate {
+            drop(packages);
+
+            util::Configure {
+                manifest_path: &manifest_path,
+                color: &color,
+                frozen,
+                locked,
+                offline,
+                modify_target_dir: |d| d.parent().unwrap().join("demonstrate"),
+            }
+            .configure(config)?;
+
+            let ws = util::workspace(&config, &manifest_path)?;
+
+            let (compile_opts, _) = util::CompileOptionsForSingleTarget {
+                ws: &ws,
+                jobs: &jobs,
+                lib,
+                bin: &bin,
+                example: &example,
+                test: &test,
+                bench: &bench,
+                release: !debug,
+                features: &features,
+                all_features,
+                no_default_features,
+                manifest_path: &manifest_path,
+                compile_mode: CompileMode::Build,
+            }
+            .compile_options_for_single_target()?;
+
+            self::demonstrate(&ws, &compile_opts, outcome.used.clone())?;
+        }
+
+        Ok(outcome)
+    }
+}
+
+fn demonstrate(
     ws: &Workspace,
     compile_opts: &CompileOptions,
     used: BTreeSet<PackageId>,
@@ -287,7 +403,7 @@ pub struct LinkedPackages {
 }
 
 impl LinkedPackages {
-    pub fn find(
+    fn find(
         ws: &Workspace,
         packages: &PackageSet,
         resolve: &Resolve,

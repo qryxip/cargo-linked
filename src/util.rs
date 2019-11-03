@@ -11,17 +11,17 @@ use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::path::PathBuf;
 
-pub struct Configure<'a, F: FnOnce(PathBuf) -> PathBuf> {
-    pub manifest_path: &'a Option<PathBuf>,
-    pub color: &'a Option<String>,
-    pub frozen: bool,
-    pub locked: bool,
-    pub offline: bool,
-    pub modify_target_dir: F,
+pub(crate) struct Configure<'a, F: FnOnce(PathBuf) -> PathBuf> {
+    pub(crate) manifest_path: &'a Option<PathBuf>,
+    pub(crate) color: &'a Option<String>,
+    pub(crate) frozen: bool,
+    pub(crate) locked: bool,
+    pub(crate) offline: bool,
+    pub(crate) modify_target_dir: F,
 }
 
 impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
-    pub fn configure(self, config: &mut Config) -> CargoResult<()> {
+    pub(crate) fn configure(self, config: &mut Config) -> CargoResult<()> {
         let Self {
             manifest_path,
             color,
@@ -55,7 +55,7 @@ impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
     }
 }
 
-pub fn workspace<'a>(
+pub(crate) fn workspace<'a>(
     config: &'a Config,
     manifest_path: &Option<PathBuf>,
 ) -> CargoResult<Workspace<'a>> {
@@ -67,24 +67,24 @@ pub fn workspace<'a>(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct CompileOptionsForSingleTarget<'a, 'b> {
-    pub ws: &'a Workspace<'a>,
-    pub jobs: &'b Option<String>,
-    pub lib: bool,
-    pub bin: &'b Option<String>,
-    pub example: &'b Option<String>,
-    pub test: &'b Option<String>,
-    pub bench: &'b Option<String>,
-    pub release: bool,
-    pub features: &'b [String],
-    pub all_features: bool,
-    pub no_default_features: bool,
-    pub manifest_path: &'b Option<PathBuf>,
-    pub compile_mode: CompileMode,
+pub(crate) struct CompileOptionsForSingleTarget<'a, 'b> {
+    pub(crate) ws: &'a Workspace<'a>,
+    pub(crate) jobs: &'b Option<String>,
+    pub(crate) lib: bool,
+    pub(crate) bin: &'b Option<String>,
+    pub(crate) example: &'b Option<String>,
+    pub(crate) test: &'b Option<String>,
+    pub(crate) bench: &'b Option<String>,
+    pub(crate) release: bool,
+    pub(crate) features: &'b [String],
+    pub(crate) all_features: bool,
+    pub(crate) no_default_features: bool,
+    pub(crate) manifest_path: &'b Option<PathBuf>,
+    pub(crate) compile_mode: CompileMode,
 }
 
 impl<'a> CompileOptionsForSingleTarget<'a, '_> {
-    pub fn compile_options_for_single_target(
+    pub(crate) fn compile_options_for_single_target(
         self,
     ) -> CargoResult<(CompileOptions<'a>, &'a Target)> {
         let Self {
