@@ -46,7 +46,7 @@ use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, DefaultExecutor, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
-use cargo::ops::{CompileOptions, Packages};
+use cargo::ops::{CleanOptions, CompileOptions, Packages};
 use cargo::util::process_builder::ProcessBuilder;
 use cargo::{CargoResult, CliResult};
 use fixedbitset::FixedBitSet;
@@ -281,11 +281,16 @@ fn demonstrate(
             }
             Ok(())
         }
-
-        fn force_rebuild(&self, _: &Unit) -> bool {
-            true
-        }
     }
+
+    let clean_opts = CleanOptions {
+        config: ws.config(),
+        spec: vec![],
+        target: compile_opts.build_config.requested_target.clone(),
+        release: compile_opts.build_config.release,
+        doc: compile_opts.build_config.mode.is_doc(),
+    };
+    cargo::ops::clean(ws, &clean_opts)?;
 
     let exec: Arc<dyn Executor + 'static> = Arc::new(Exec { used });
     cargo::ops::compile_with_exec(ws, &compile_opts, &exec).map(|_| ())
