@@ -218,107 +218,29 @@ $ cargo linked --debug 2>&- | jq
 ### `lib`
 
 ```rust
-use cargo::core::compiler::CompileMode;
-use cargo::ops::Packages;
-use cargo_linked::LinkedPackages;
-
-use std::path::PathBuf;
-
-let jobs: Option<String> = unimplemented!();
-let lib: bool = unimplemented!();
-let bin: Option<String> = unimplemented!();
-let example: Option<String> = unimplemented!();
-let test: Option<String> = unimplemented!();
-let bench: Option<String> = unimplemented!();
-let release: bool = unimplemented!();
-let features: Vec<String> = unimplemented!();
-let all_features: bool = unimplemented!();
-let no_default_features: bool = unimplemented!();
-let manifest_path: Option<PathBuf> = unimplemented!();
-let color: Option<String> = unimplemented!();
-let frozen: bool = unimplemented!();
-let locked: bool = unimplemented!();
-let offline: bool = unimplemented!();
+use cargo_linked::{CargoLinked, LinkedPackages};
 
 let mut config = cargo::Config::default()?;
 
-cargo_linked::util::Configure {
-    manifest_path: &manifest_path,
-    color: &color,
-    frozen,
-    locked,
-    offline,
-    modify_target_dir: |d| d.join("cargo_linked").join("target"),
+let LinkedPackages { used, unused } = CargoLinked {
+    demonstrate: unimplemented!(),
+    lib: unimplemented!(),
+    debug: unimplemented!(),
+    all_features: unimplemented!(),
+    no_default_features: unimplemented!(),
+    frozen: unimplemented!(),
+    locked: unimplemented!(),
+    offline: unimplemented!(),
+    jobs: unimplemented!(),
+    bin: unimplemented!(),
+    example: unimplemented!(),
+    test: unimplemented!(),
+    bench: unimplemented!(),
+    features: unimplemented!(),
+    manifest_path: unimplemented!(),
+    color: unimplemented!(),
 }
-.configure(&mut config)?;
-
-let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
-
-let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
-    cargo::ops::resolve_ws_precisely(
-        &ws,
-        &features,
-        all_features,
-        no_default_features,
-        &specs,
-    )
-})?;
-
-let (compile_opts, target) = cargo_linked::util::CompileOptionsForSingleTarget {
-    ws: &ws,
-    jobs: &jobs,
-    lib,
-    bin: &bin,
-    example: &example,
-    test: &test,
-    bench: &bench,
-    release,
-    features: &features,
-    all_features,
-    no_default_features,
-    manifest_path: &manifest_path,
-    compile_mode: CompileMode::Check {
-        test: test.is_some(),
-    },
-}
-.compile_options_for_single_target()?;
-
-let LinkedPackages { used, unused } =
-    LinkedPackages::find(&ws, &packages, &resolve, &compile_opts, target)?;
-
-let demonstrate: bool = unimplemented!();
-if demonstrate {
-    cargo_linked::util::Configure {
-        manifest_path: &manifest_path,
-        color: &color,
-        frozen,
-        locked,
-        offline,
-        modify_target_dir: |d| d.parent().unwrap().join("target"),
-    }
-    .configure(&mut config)?;
-
-    let ws = cargo_linked::util::workspace(&config, &manifest_path)?;
-
-    let (compile_opts, _) = cargo_linked::util::CompileOptionsForSingleTarget {
-        ws: &ws,
-        jobs: &jobs,
-        lib,
-        bin: &bin,
-        example: &example,
-        test: &test,
-        bench: &bench,
-        release,
-        features: &features,
-        all_features,
-        no_default_features,
-        manifest_path: &manifest_path,
-        compile_mode: CompileMode::Build,
-    }
-    .compile_options_for_single_target()?;
-
-    cargo_linked::demonstrate(&ws, &compile_opts, used.clone())?;
-}
+.outcome(&mut config)?;
 ```
 
 ## License
