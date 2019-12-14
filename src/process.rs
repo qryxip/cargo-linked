@@ -73,12 +73,9 @@ impl<'a> Rustc<'a> {
                 None => return Err(err),
                 Some(Output { stderr, .. }) => str::from_utf8(stderr)?,
             };
-            stderr
-                .lines()
-                .map(serde_json::from_str)
-                .collect::<serde_json::Result<_>>()
-                .map(Some)
-                .map_err(Into::into)
+            Ok(Some(
+                stderr.lines().flat_map(serde_json::from_str).collect(),
+            ))
         } else {
             Ok(None)
         }
@@ -136,7 +133,7 @@ struct RustcOpts {
     #[structopt(short = "l", parse(from_os_str))]
     link_crate: Vec<OsString>,
     #[structopt(long, parse(from_os_str))]
-    crate_type: Option<OsString>,
+    crate_type: Vec<OsString>,
     #[structopt(long, parse(from_os_str))]
     crate_name: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
@@ -151,14 +148,14 @@ struct RustcOpts {
     opt_level_2: bool,
     #[structopt(short = "o", parse(from_os_str))]
     output: Option<OsString>,
-    #[structopt(long)]
-    test: bool,
     #[structopt(long, parse(from_os_str))]
     out_dir: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
     explain: Vec<OsString>,
     #[structopt(long, parse(from_os_str))]
     target: Option<OsString>,
+    #[structopt(long)]
+    test: bool,
     #[structopt(short = "W", parse(from_os_str))]
     warn: Vec<OsString>,
     #[structopt(short = "A", parse(from_os_str))]
@@ -181,6 +178,8 @@ struct RustcOpts {
     sysroot: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
     error_format: Option<OsString>,
+    #[structopt(long, parse(from_os_str))]
+    json: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
     color: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
@@ -205,7 +204,7 @@ impl RustcOpts {
             args.push("-l".as_ref());
             args.push(l);
         }
-        if let Some(crate_type) = &self.crate_type {
+        for crate_type in &self.crate_type {
             args.push("--crate-type".as_ref());
             args.push(crate_type);
         }
@@ -297,6 +296,10 @@ impl RustcOpts {
         } else if let Some(error_format) = &self.error_format {
             args.push("--error-format".as_ref());
             args.push(error_format);
+        }
+        if let Some(json) = &self.json {
+            args.push("--json".as_ref());
+            args.push(json);
         }
         if let Some(color) = &self.color {
             args.push("--color".as_ref());
