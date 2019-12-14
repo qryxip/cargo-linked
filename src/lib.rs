@@ -45,6 +45,7 @@ use crate::process::Rustc;
 use ansi_term::Colour;
 use cargo::core::compiler::{CompileMode, DefaultExecutor, Executor, Unit};
 use cargo::core::manifest::{Target, TargetKind};
+use cargo::core::resolver::ResolveOpts;
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
 use cargo::ops::{CleanOptions, CompileOptions, Packages};
 use cargo::util::process_builder::ProcessBuilder;
@@ -186,15 +187,11 @@ impl CargoLinked {
 
         let ws = util::workspace(&config, &manifest_path)?;
 
-        let (packages, resolve) = Packages::All.to_package_id_specs(&ws).and_then(|specs| {
-            cargo::ops::resolve_ws_precisely(
-                &ws,
-                &features,
-                all_features,
-                no_default_features,
-                &specs,
-            )
-        })?;
+        let (packages, resolve) = cargo::ops::resolve_ws_with_opts(
+            &ws,
+            ResolveOpts::new(true, &features, all_features, !no_default_features),
+            &Packages::All.to_package_id_specs(&ws)?,
+        )?;
 
         let (compile_opts, target) = util::CompileOptionsForSingleTarget {
             ws: &ws,
