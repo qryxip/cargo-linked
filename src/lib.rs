@@ -175,6 +175,9 @@ impl CargoLinked {
             color,
         } = self;
 
+        let manifest_path = manifest_path.map(Ok).unwrap_or_else(|| {
+            cargo::util::important_paths::find_root_manifest_for_wd(config.cwd())
+        })?;
         util::Configure {
             manifest_path: &manifest_path,
             color: &color,
@@ -185,7 +188,7 @@ impl CargoLinked {
         }
         .configure(config)?;
 
-        let ws = util::workspace(&config, &manifest_path)?;
+        let ws = Workspace::new(&manifest_path, config)?;
 
         let (packages, resolve) = cargo::ops::resolve_ws_with_opts(
             &ws,
@@ -227,7 +230,7 @@ impl CargoLinked {
             }
             .configure(config)?;
 
-            let ws = util::workspace(&config, &manifest_path)?;
+            let ws = Workspace::new(&manifest_path, config)?;
 
             let (compile_opts, _) = util::CompileOptionsForSingleTarget {
                 ws: &ws,
@@ -259,6 +262,7 @@ fn demonstrate(
     used: BTreeSet<PackageId>,
 ) -> CargoResult<()> {
     struct Exec {
+        current: PackageId,
         used: BTreeSet<PackageId>,
     }
 
@@ -273,7 +277,8 @@ fn demonstrate(
             on_stderr_line: &mut dyn FnMut(&str) -> CargoResult<()>,
         ) -> CargoResult<()> {
             // `compile_with_exec` runs `buiid-script-build`s outside of `exec`.
-            if self.used.contains(&id) || target.is_custom_build() {
+            if id == self.current || self.used.contains(&id) || target.is_custom_build() {
+                // TODO: create empty executables for `custom-build`s
                 DefaultExecutor.exec(cmd, id, target, mode, on_stdout_line, on_stderr_line)?;
             }
             Ok(())
@@ -289,7 +294,8 @@ fn demonstrate(
     };
     cargo::ops::clean(ws, &clean_opts)?;
 
-    let exec: Arc<dyn Executor + 'static> = Arc::new(Exec { used });
+    let current = ws.current()?.package_id();
+    let exec: Arc<dyn Executor + 'static> = Arc::new(Exec { current, used });
     cargo::ops::compile_with_exec(ws, &compile_opts, &exec).map(|_| ())
 }
 
