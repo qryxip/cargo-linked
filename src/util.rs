@@ -9,10 +9,10 @@ use maplit::hashmap;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) struct Configure<'a, F: FnOnce(PathBuf) -> PathBuf> {
-    pub(crate) manifest_path: &'a Option<PathBuf>,
+    pub(crate) manifest_path: &'a Path,
     pub(crate) color: &'a Option<String>,
     pub(crate) frozen: bool,
     pub(crate) locked: bool,
@@ -31,13 +31,7 @@ impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
             modify_target_dir,
         } = self;
 
-        let mut args = hashmap!();
-        if let Some(manifest_path) = manifest_path {
-            args.insert("manifest-path", vec![manifest_path.into()]);
-        }
-
-        let target_dir = arg_matches_from(args)
-            .workspace(&config)?
+        let target_dir = Workspace::new(manifest_path, config)?
             .target_dir()
             .into_path_unlocked();
         let target_dir = modify_target_dir(target_dir);
@@ -55,17 +49,6 @@ impl<F: FnOnce(PathBuf) -> PathBuf> Configure<'_, F> {
     }
 }
 
-pub(crate) fn workspace<'a>(
-    config: &'a Config,
-    manifest_path: &Option<PathBuf>,
-) -> CargoResult<Workspace<'a>> {
-    let mut args = hashmap!();
-    if let Some(manifest_path) = manifest_path {
-        args.insert("manifest-path", vec![OsString::from(manifest_path)]);
-    }
-    arg_matches_from(args).workspace(config)
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CompileOptionsForSingleTarget<'a, 'b> {
     pub(crate) ws: &'a Workspace<'a>,
@@ -79,7 +62,7 @@ pub(crate) struct CompileOptionsForSingleTarget<'a, 'b> {
     pub(crate) features: &'b [String],
     pub(crate) all_features: bool,
     pub(crate) no_default_features: bool,
-    pub(crate) manifest_path: &'b Option<PathBuf>,
+    pub(crate) manifest_path: &'b Path,
     pub(crate) compile_mode: CompileMode,
 }
 
@@ -103,7 +86,7 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
             compile_mode,
         } = self;
 
-        let mut args = hashmap!();
+        let mut args = hashmap!("manifest-path" => vec![manifest_path.into()]);
         if let Some(jobs) = jobs {
             args.insert("jobs", vec![jobs.into()]);
         }
@@ -115,9 +98,6 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
         }
         if no_default_features {
             args.insert("no-default-features", vec![]);
-        }
-        if let Some(manifest_path) = manifest_path {
-            args.insert("manifest-path", vec![manifest_path.into()]);
         }
 
         let current = ws.current()?;
