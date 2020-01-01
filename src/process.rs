@@ -125,7 +125,7 @@ impl<'a> Rustc<'a> {
 }
 
 #[derive(Debug, StructOpt)]
-struct RustcOpts {
+pub(crate) struct RustcOpts {
     #[structopt(long, parse(from_os_str))]
     cfg: Vec<OsString>,
     #[structopt(short = "L", parse(from_os_str))]
@@ -134,8 +134,8 @@ struct RustcOpts {
     link_crate: Vec<OsString>,
     #[structopt(long, parse(from_os_str))]
     crate_type: Vec<OsString>,
-    #[structopt(long, parse(from_os_str))]
-    crate_name: Option<OsString>,
+    #[structopt(long)]
+    crate_name: Option<String>,
     #[structopt(long, parse(from_os_str))]
     edition: Option<OsString>,
     #[structopt(long, parse(from_os_str))]
@@ -189,6 +189,14 @@ struct RustcOpts {
 }
 
 impl RustcOpts {
+    pub(crate) fn out_dir(&self) -> Option<&OsStr> {
+        self.out_dir.as_deref()
+    }
+
+    pub(crate) fn crate_name(&self) -> Option<&str> {
+        self.crate_name.as_deref()
+    }
+
     #[allow(clippy::cognitive_complexity)]
     fn to_args(&self, exclude: &FixedBitSet, error_format_json: bool) -> Vec<&OsStr> {
         let mut args = Vec::<&OsStr>::new();
@@ -210,7 +218,7 @@ impl RustcOpts {
         }
         if let Some(crate_name) = &self.crate_name {
             args.push("--crate-name".as_ref());
-            args.push(crate_name);
+            args.push(crate_name.as_ref());
         }
         if let Some(edition) = &self.edition {
             args.push("--edition".as_ref());

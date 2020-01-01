@@ -6,22 +6,22 @@
 //! let mut config = cargo::Config::default()?;
 //!
 //! let LinkedPackages { used, unused } = CargoLinked {
-//!     demonstrate: unimplemented!(),
-//!     lib: unimplemented!(),
-//!     debug: unimplemented!(),
-//!     all_features: unimplemented!(),
-//!     no_default_features: unimplemented!(),
-//!     frozen: unimplemented!(),
-//!     locked: unimplemented!(),
-//!     offline: unimplemented!(),
-//!     jobs: unimplemented!(),
-//!     bin: unimplemented!(),
-//!     example: unimplemented!(),
-//!     test: unimplemented!(),
-//!     bench: unimplemented!(),
-//!     features: unimplemented!(),
-//!     manifest_path: unimplemented!(),
-//!     color: unimplemented!(),
+//!     demonstrate: todo!(),
+//!     lib: todo!(),
+//!     debug: todo!(),
+//!     all_features: todo!(),
+//!     no_default_features: todo!(),
+//!     frozen: todo!(),
+//!     locked: todo!(),
+//!     offline: todo!(),
+//!     jobs: todo!(),
+//!     bin: todo!(),
+//!     example: todo!(),
+//!     test: todo!(),
+//!     bench: todo!(),
+//!     features: todo!(),
+//!     manifest_path: todo!(),
+//!     color: todo!(),
 //! }
 //! .outcome(&mut config)?;
 //! # cargo::CargoResult::Ok(())
@@ -40,16 +40,19 @@ mod ser;
 mod util;
 
 use crate::fs::JsonFileLock;
-use crate::process::Rustc;
+use crate::process::{Rustc, RustcOpts};
 
 use ansi_term::Colour;
-use cargo::core::compiler::{CompileMode, DefaultExecutor, Executor, Unit};
+use cargo::core::compiler::{
+    CompileKind, CompileMode, DefaultExecutor, Executor, ProfileKind, Unit,
+};
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::resolver::ResolveOpts;
 use cargo::core::{dependency, Package, PackageId, PackageSet, Resolve, Workspace};
 use cargo::ops::{CleanOptions, CompileOptions, Packages};
 use cargo::util::process_builder::ProcessBuilder;
 use cargo::{CargoResult, CliResult};
+use failure::format_err;
 use fixedbitset::FixedBitSet;
 use if_chain::if_chain;
 use maplit::{btreemap, btreeset, hashset};
@@ -57,13 +60,14 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use structopt::clap::AppSettings;
 use structopt::StructOpt;
+use tempdir::TempDir;
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt::Write as _;
 use std::io::Write;
-use std::ops::Index;
-use std::path::PathBuf;
+use std::iter;
+use std::ops::{Deref, Index};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, StructOpt)]
@@ -190,11 +194,14 @@ impl CargoLinked {
 
         let ws = Workspace::new(&manifest_path, config)?;
 
-        let (packages, resolve) = cargo::ops::resolve_ws_with_opts(
-            &ws,
-            ResolveOpts::new(true, &features, all_features, !no_default_features),
-            &Packages::All.to_package_id_specs(&ws)?,
-        )?;
+        let (packages, resolve) = {
+            let ws_resolve = cargo::ops::resolve_ws_with_opts(
+                &ws,
+                ResolveOpts::new(true, &features, all_features, !no_default_features),
+                &Packages::All.to_package_id_specs(&ws)?,
+            )?;
+            (ws_resolve.pkg_set, ws_resolve.targeted_resolve)
+        };
 
         let (compile_opts, target) = util::CompileOptionsForSingleTarget {
             ws: &ws,
@@ -269,16 +276,35 @@ fn demonstrate(
     impl Executor for Exec {
         fn exec(
             &self,
-            cmd: ProcessBuilder,
+            mut cmd: ProcessBuilder,
             id: PackageId,
             target: &Target,
             mode: CompileMode,
             on_stdout_line: &mut dyn FnMut(&str) -> CargoResult<()>,
             on_stderr_line: &mut dyn FnMut(&str) -> CargoResult<()>,
         ) -> CargoResult<()> {
-            // `compile_with_exec` runs `buiid-script-build`s outside of `exec`.
-            if id == self.current || self.used.contains(&id) || target.is_custom_build() {
-                // TODO: create empty executables for `custom-build`s
+            if id == self.current || self.used.contains(&id) {
+                DefaultExecutor.exec(cmd, id, target, mode, on_stdout_line, on_stderr_line)?;
+            } else if target.is_custom_build() {
+                // `compile_with_exec` runs build scripts outside of `exec`.
+                let tempdir = TempDir::new("cargo_linked")?;
+                let do_nothing_rs = tempdir.path().join("do-nothing.rs");
+                crate::fs::write(&do_nothing_rs, "fn main() {}")?;
+
+                let args = iter::once("".as_ref()).chain(cmd.get_args().iter().map(Deref::deref));
+                let opts = RustcOpts::from_iter_safe(args)?;
+                let out_dir = opts
+                    .out_dir()
+                    .ok_or_else(|| format_err!("`--out-dir` should be present"))?;
+                let crate_name = opts
+                    .crate_name()
+                    .ok_or_else(|| format_err!("`--crate-name` should be present"))?;
+                let mut output = Path::new(out_dir).join(crate_name.replace('_', "-"));
+                if cfg!(windows) {
+                    output = output.with_extension("exe");
+                }
+
+                cmd.args_replace(&["-o".as_ref(), &*output, &*do_nothing_rs]);
                 DefaultExecutor.exec(cmd, id, target, mode, on_stdout_line, on_stderr_line)?;
             }
             Ok(())
@@ -288,8 +314,13 @@ fn demonstrate(
     let clean_opts = CleanOptions {
         config: ws.config(),
         spec: vec![],
-        target: compile_opts.build_config.requested_target.clone(),
-        release: compile_opts.build_config.release,
+        // target: compile_opts.build_config.requested_target.clone(),
+        target: match &compile_opts.build_config.requested_kind {
+            CompileKind::Host => None,
+            CompileKind::Target(target) => Some(target.rustc_target().to_owned()),
+        },
+        profile_kind: compile_opts.build_config.profile_kind.clone(),
+        profile_specified: compile_opts.build_config.profile_kind.name() != "dev",
         doc: compile_opts.build_config.mode.is_doc(),
     };
     cargo::ops::clean(ws, &clean_opts)?;
@@ -304,9 +335,9 @@ fn demonstrate(
 struct Cache(Vec<CacheValue>);
 
 impl Cache {
-    fn take_or_default(&mut self, key: CacheKey) -> BTreeMap<PackageId, CacheUsedPackages> {
+    fn take_or_default(&mut self, key: &CacheKey) -> BTreeMap<PackageId, CacheUsedPackages> {
         (0..self.0.len())
-            .find(|&i| self.0[i].key == key)
+            .find(|&i| self.0[i].key == *key)
             .map(|i| self.0.remove(i).used_packages)
             .unwrap_or_default()
     }
@@ -316,17 +347,17 @@ impl Cache {
             key,
             used_packages: value,
         });
-        self.0.sort_by_key(|v| v.key);
+        self.0.sort_by(|a, b| a.key.cmp(&b.key));
     }
 }
 
-impl Index<CacheKey> for Cache {
+impl Index<&'_ CacheKey> for Cache {
     type Output = BTreeMap<PackageId, CacheUsedPackages>;
 
-    fn index(&self, index: CacheKey) -> &BTreeMap<PackageId, CacheUsedPackages> {
+    fn index(&self, index: &'_ CacheKey) -> &BTreeMap<PackageId, CacheUsedPackages> {
         self.0
             .iter()
-            .find(|v| v.key == index)
+            .find(|v| v.key == *index)
             .map(|CacheValue { used_packages, .. }| used_packages)
             .unwrap_or_else(|| panic!("no value found for {:?}", index))
     }
@@ -338,16 +369,15 @@ struct CacheValue {
     used_packages: BTreeMap<PackageId, CacheUsedPackages>,
 }
 
-#[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Deserialize, miniserde::Serialize,
-)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, serde::Deserialize, miniserde::Serialize)]
 struct CacheKey {
-    release: bool,
+    profile_kind: String,
 }
 
 impl CacheKey {
-    fn new(release: bool) -> Self {
-        Self { release }
+    fn new(profile_kind: &ProfileKind) -> Self {
+        let profile_kind = profile_kind.name().to_owned();
+        Self { profile_kind }
     }
 }
 
@@ -530,9 +560,11 @@ impl LinkedPackages {
             .open_rw("cache.json", ws.config(), "msg?")?;
         let mut cache_file = JsonFileLock::<Cache>::from(cache_file);
         let mut cache = cache_file.read()?;
-        let cache_key = CacheKey::new(compile_opts.build_config.release);
+        let cache_key = CacheKey::new(&compile_opts.build_config.profile_kind);
 
-        let store = Arc::new(Mutex::new(ExecStore::new(cache.take_or_default(cache_key))));
+        let store = Arc::new(Mutex::new(ExecStore::new(
+            cache.take_or_default(&cache_key),
+        )));
         let exec: Arc<dyn Executor + 'static> = Arc::new(Exec {
             target: target.clone(),
             extern_crate_names,
@@ -550,12 +582,12 @@ impl LinkedPackages {
             .into_inner()
             .unwrap();
 
-        cache.insert(cache_key, used_packages);
+        cache.insert(cache_key.clone(), used_packages);
         cache_file.write(&cache)?;
 
         let mut outcome = Self::default();
         outcome.used = {
-            let mut used = cache[cache_key]
+            let mut used = cache[&cache_key]
                 .get(&current.package_id())
                 .unwrap()
                 .bin
@@ -566,14 +598,14 @@ impl LinkedPackages {
             while !cur.is_empty() {
                 let mut next = btreeset!();
                 for cur in cur {
-                    for dep in cache[cache_key][&cur]
+                    for dep in cache[&cache_key][&cur]
                         .lib
                         .as_ref()
                         .unwrap()
                         .iter()
                         .cloned()
                         .chain(
-                            cache[cache_key][&cur]
+                            cache[&cache_key][&cur]
                                 .custom_build
                                 .clone()
                                 .unwrap_or_default(),
@@ -648,7 +680,7 @@ impl Executor for Exec {
         let uses = match uses {
             Ok(uses) => uses,
             Err(err) => {
-                let mut msg = "".to_owned();
+                let mut lines = vec![];
                 for (i, cause) in err.as_fail().iter_chain().enumerate() {
                     let head = if i == 0 && err.as_fail().cause().is_none() {
                         "warning:"
@@ -657,20 +689,23 @@ impl Executor for Exec {
                     } else {
                         "caused by:"
                     };
-                    if self.supports_color {
-                        write!(msg, "{} ", Colour::Yellow.bold().paint(head)).unwrap();
+                    lines.push(if self.supports_color {
+                        format!("{} ", Colour::Yellow.bold().paint(head))
                     } else {
-                        write!(msg, "{} ", head).unwrap();
-                    }
+                        format!("{} ", head)
+                    });
                     for (i, line) in cause.to_string().lines().enumerate() {
+                        let mut msg = "".to_owned();
                         if i > 0 {
                             (0..=head.len()).for_each(|_| msg.push(' '));
                         }
                         msg += line;
-                        msg.push('\n');
+                        lines.push(msg);
                     }
                 }
-                on_stderr_line(msg.trim_end())?;
+                for line in lines {
+                    on_stderr_line(&line)?;
+                }
                 hashset!()
             }
         };
