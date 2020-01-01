@@ -2,7 +2,7 @@ use cargo::core::compiler::CompileMode;
 use cargo::core::manifest::{Target, TargetKind};
 use cargo::core::Workspace;
 use cargo::ops::CompileOptions;
-use cargo::util::command_prelude::ArgMatchesExt;
+use cargo::util::command_prelude::{ArgMatchesExt, ProfileChecking};
 use cargo::{CargoResult, Config};
 use maplit::hashmap;
 
@@ -155,8 +155,12 @@ impl<'a> CompileOptionsForSingleTarget<'a, '_> {
 
         args.insert(arg_key, arg_val);
 
-        let compile_opts =
-            arg_matches_from(args.clone()).compile_options(ws.config(), compile_mode, Some(ws))?;
+        let compile_opts = arg_matches_from(args.clone()).compile_options(
+            ws.config(),
+            compile_mode,
+            Some(ws),
+            ProfileChecking::Checked,
+        )?;
         Ok((compile_opts, target))
     }
 }

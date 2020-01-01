@@ -1,11 +1,17 @@
 use cargo::util::FileLock;
-use failure::Fallible;
-use failure::ResultExt as _;
+use failure::{format_err, Fallible, ResultExt as _};
 use serde::de::DeserializeOwned;
 
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::marker::PhantomData;
 use std::path::Path;
+
+pub(crate) fn write(path: impl AsRef<Path>, contents: impl AsRef<str>) -> Fallible<()> {
+    let path = path.as_ref();
+    std::fs::write(path, contents.as_ref())
+        .with_context(|_| format_err!("Failed to write {}", path.display()))
+        .map_err(Into::into)
+}
 
 pub(crate) fn read_src(path: &Path) -> Fallible<syn::File> {
     let src = std::fs::read_to_string(path)
